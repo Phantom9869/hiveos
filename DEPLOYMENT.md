@@ -54,19 +54,37 @@ Returns `UserId`, `Account`, and `Arn`.
 
 ---
 
-## MANUAL ACTION 2 — Request Bedrock model access
+## MANUAL ACTION 2 — Anthropic use-case form ✅ DONE (2026-09-18)
 
-**Reason:** Bedrock models are not enabled by default. Without access, Phase 3 cannot run. This has the **longest lead time — start it first**.
+> **The *Model access* page is retired.** Serverless foundation models now auto-enable on
+> first invoke across all AWS commercial regions. There is no per-model enabling step.
+> The only remaining gate for Anthropic models is a one-time account-level use-case form,
+> and it lives as a **banner on the Model catalog page** — not on Model access.
 
-**Location:** AWS Console → **Amazon Bedrock** → region **US East (N. Virginia) `us-east-1`** → left sidebar **Model access** → *Modify model access* / *Enable specific models*.
+**Location (for reference):** Console → **Amazon Bedrock** → `us-east-1` → **Model catalog**
+→ banner *"Anthropic requires first-time customers to submit use case details"* → **Submit use case details**.
 
-**Steps:**
-1. Select the **Anthropic** models (prefer a Haiku-tier model for demo speed and cost; enable a Sonnet-tier as a backup).
-2. Submit the access request.
-3. Some models grant instantly; others need a short use-case form. Fill it in if prompted.
-4. Wait until status reads **Access granted**.
+Form fields: company name, company website URL, industry, intended users (internal/external),
+and a ≤500-char use-case description. The submission is shared with Anthropic.
 
-**Expected result:** Model access page shows *Access granted* for at least one Anthropic model.
+**Status:** submitted and confirmed cleared. Verified by the smoke-test error changing from
+`ResourceNotFoundException` (form gate) to a quota error — a different error means this gate passed.
+
+---
+
+## MANUAL ACTION 2b — AWS Paid Plan upgrade ⚠️ OUTSTANDING
+
+**Reason:** Bedrock invocation is quota-blocked account-wide. **42 of 44** per-model per-day
+token quotas are `0` and **all are `adjustable=False`**, so a Service Quotas increase request
+is not possible. This blocks Phase 3 only.
+
+**Location:** AWS Console → **Billing and Cost Management** → account/plan settings → upgrade
+from **Free Plan** to **Paid Plan**.
+
+**Expected result:** per-model per-day token quotas become non-zero; the `$134` credit becomes
+spendable on Bedrock.
+
+**Verification:** re-run the smoke test below. Success looks like a real completion, not a throttle.
 
 **Verification:**
 ```bash
