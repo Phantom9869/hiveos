@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  HiveOS — OS-style scheduler for a team's shared AI agent budget.
+  All stack resources live here. Never create them with one-off CLI commands:
+  CloudFormation owns the inventory, which is what prevents duplicate
+  infrastructure across sessions. See ARCHITECTURE.md decision 10.
+
+# ---------------------------------------------------------------------------
+# PHASE 0 deploys this template with the DynamoDB table ONLY.
+# Resources are added incrementally:
+#   Phase 1  -> WebSocket API, Router Lambda
+#   Phase 2  -> SQS queue + DLQ, Agent Runner Lambda
+#   Phase 3  -> Bedrock IAM permissions on the Agent Runner
+# Sections below are marked with the phase that fills them in.
+# ---------------------------------------------------------------------------
+
+Parameters:
+  TokenBudget:
+    Type: Number
+    Default: 1000000
+    Description: Team token ceiling. Enforced server-side by the Agent Runner.
+
+  MaxTokensPerCall:
+    Type: Number
+    Default: 1024
+    Description: Per-invocation output cap. Keeps a runaway loop cheap.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - arm64            # cheaper, faster, builds natively under --use-container on Apple Silicon
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref StateTable
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # PHASE 0 — State
+  # Single table, PK/SK pattern. Schema in CONTRACT.md.
+  # -------------------------------------------------------------------------
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: hiveos-state
+      BillingMode: PAY_PER_REQUEST      # scales to zero; no idle cost
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  # -------------------------------------------------------------------------
+  # PHASE 1 — WebSocket API + Router Lambda
+  #
+  # SAM has no first-class WebSocket resource, so these are raw
+  # AWS::ApiGatewayV2::* resources (a SAM template is a CloudFormation
+  # superset, so this is supported).
+  #
+  # Needed: Api (ProtocolType WEBSOCKET), Integration, Routes for
+  # $connect / $disconnect / $default, Deployment, Stage, Lambda permissions.
+  #
+  # The Router Lambda's IAM policy MUST include execute-api:ManageConnections
+  # or every broadcast fails with 403. Common and confusing omission.
+  # -------------------------------------------------------------------------
+
+  # -------------------------------------------------------------------------
+  # PHASE 2 — SQS queue + DLQ, Agent Runner Lambda
+  #
+  # Queue carries every agent task (see ARCHITECTURE.md decision 1 for why
+  # waiting tasks live in DynamoDB, not in SQS).
+  # Set a generous maxReceiveCount so a transient failure does not
+  # dead-letter a demo task.
+  # Agent Runner timeout must exceed the slowest expected Bedrock call.
+  # -------------------------------------------------------------------------
+
+  # -------------------------------------------------------------------------
+  # PHASE 3 — Bedrock permissions
+  #
+  # bedrock:InvokeModel (and InvokeModelWithResponseStream if streaming)
+  # on the Agent Runner role, scoped to the resolved model / inference
+  # profile ARN recorded in CONTRACT.md.
+  # -------------------------------------------------------------------------
+
+Outputs:
+  TableName:
+    Description: DynamoDB single-table store
+    Value: !Ref StateTable
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  TokenBudget:
+    Description: Configured team token ceiling
+    Value: !Ref TokenBudget
+
+  # Added in Phase 1:
+  #   WebSocketURL  — wss:// endpoint the frontend connects to
+  #   WebSocketMgmt — https:// management endpoint for post_to_connection
+  # Added in Phase 2:
+  #   QueueUrl      — SQS queue URL for the Router to dispatch into

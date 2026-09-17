@@ -1,0 +1,194 @@
+# CONTRACT.md — Shared interfaces
+
+Everything here must stay consistent across backend, frontend, and infrastructure. Changing anything in this file means updating every consumer in the same commit.
+
+Ranks 3rd in the source-of-truth hierarchy — above `PRD.md`, below deployed AWS state and actual code.
+
+---
+
+## Naming and environment
+
+| Constant | Value |
+|---|---|
+| Stack name | `hiveos` |
+| Region | `us-east-1` |
+| DynamoDB table | `hiveos-state` |
+| SQS queue | `hiveos-agent-tasks` |
+| SQS dead-letter queue | `hiveos-agent-tasks-dlq` |
+| Team ID (hardcoded, MVP) | `alpha` |
+| Agent slot IDs | `coder`, `researcher` |
+| Lambda architecture | `arm64` |
+| Lambda runtime | `python3.13` |
+
+### Lambda environment variables
+
+| Variable | Set on | Meaning |
+|---|---|---|
+| `TABLE_NAME` | both | DynamoDB table name |
+| `QUEUE_URL` | Router | SQS queue URL |
+| `WS_ENDPOINT` | both | API Gateway management endpoint (`https://{api}.execute-api.{region}.amazonaws.com/{stage}`) |
+| `BEDROCK_MODEL_ID` | Agent Runner | Resolved in Phase 0 — see below |
+| `TOKEN_BUDGET` | Agent Runner | Team token ceiling |
+| `MAX_TOKENS_PER_CALL` | Agent Runner | Per-invocation output cap |
+
+### Bedrock model ID
+
+```
+UNKNOWN — VERIFY IN PHASE 0
+```
+
+Resolve with `aws bedrock list-inference-profiles --region us-east-1`, confirm with a real `bedrock-runtime converse` call, then record the exact working ID here. **Never guess it** — the Converse API and inference-profile forms differ, and a wrong ID fails at runtime, not at deploy time.
+
+---
+
+## DynamoDB single-table schema
+
+Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billing.
+
+| PK | SK | Attributes |
+|---|---|---|
+| `TEAM#alpha` | `METADATA` | `name`, `token_budget` (N), `tokens_used` (N), `created_at` |
+| `TEAM#alpha` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
+| `TEAM#alpha` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
+| `TEAM#alpha` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `enqueued_at` |
+| `TEAM#alpha` | `MEMORY#<uuid>` | `key`, `val`, `updated_by`, `created_at` |
+
+### Entity rules
+
+- **METADATA** — one per team. `tokens_used` is only ever updated with `ADD`, never read-then-write.
+- **CONN#** — one per live WebSocket connection. Deleted on `$disconnect` **and** on any `GoneException` during broadcast.
+- **AGENT#** — one per slot. `IDLE → BUSY` on claim, `BUSY → IDLE` on completion. `current_user` is `null` when `IDLE`.
+- **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched.
+- **MEMORY#** — key/value facts saved by agents. No expiry in the MVP.
+
+### Atomic slot claim
+
+The only correct way to claim a slot. Two simultaneous claims must never both succeed.
+
+```python
+table.update_item(
+    Key={'PK': f'TEAM#{team_id}', 'SK': f'AGENT#{slot_id}'},
+    UpdateExpression='SET #s = :busy, current_user = :u, claimed_at = :t',
+    ConditionExpression='#s = :idle',
+    ExpressionAttributeNames={'#s': 'status'},
+    ExpressionAttributeValues={
+        ':busy': 'BUSY', ':idle': 'IDLE',
+        ':u': user_id, ':t': now_iso,
+    },
+)
+# ConditionalCheckFailedException  =>  slot was taken; try the next one, else enqueue
+```
+
+### Atomic token accounting
+
+```python
+table.update_item(
+    Key={'PK': f'TEAM#{team_id}', 'SK': 'METADATA'},
+    UpdateExpression='ADD tokens_used :n',
+    ExpressionAttributeValues={':n': token_count},
+    ReturnValues='UPDATED_NEW',   # returns the new total for broadcasting
+)
+```
+
+---
+
+## WebSocket protocol
+
+All frames are JSON. Client frames carry `action`; server frames carry `event`.
+
+### Client → server
+
+| `action` | Payload | Handler behaviour |
+|---|---|---|
+| `claim_agent` | `{agent_type, prompt, user_id}` | Try atomic claim → dispatch to SQS, or enqueue and return position |
+| `release_agent` | `{agent_type, user_id}` | Set slot `IDLE`, dispatch the oldest queued task |
+| `send_message` | `{user_id, text}` | Broadcast to team chat |
+| `move_avatar` | `{user_id, x, y}` | Update `CONN#` row, broadcast position |
+
+### Server → client
+
+| `event` | Payload | Sent when |
+|---|---|---|
+| `state_snapshot` | `{team, agents[], tokens_used, token_budget, members[], memory[]}` | Immediately after `$connect` — a new client must be able to render everything from this one frame |
+| `agent_state_update` | `{agent_type, status, current_user, slot_id}` | Any slot state change |
+| `token_update` | `{tokens_used, token_budget, pct_used}` | After every Bedrock call |
+| `queue_update` | `{user_id, queue_position, estimated_wait_seconds}` | Queue add or removal |
+| `agent_response` | `{user_id, agent_type, text, tokens_used_this_call}` | Agent task completes |
+| `memory_updated` | `{key, val, updated_by}` | `set_team_memory` runs |
+| `budget_exhausted` | `{tokens_used, token_budget}` | Bedrock invocation refused at the ceiling |
+| `user_joined` | `{user_id, avatar, x, y}` | `$connect` |
+| `user_left` | `{user_id}` | `$disconnect` or `GoneException` |
+| `error` | `{message}` | Any handled failure worth surfacing |
+
+**`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event.
+
+---
+
+## Broadcast with GoneException handling
+
+Mandatory in every function that broadcasts. No exceptions.
+
+```python
+def broadcast_to_team(team_id, payload, apigw, table):
+    for conn_id in get_team_connections(team_id, table):
+        try:
+            apigw.post_to_connection(
+                ConnectionId=conn_id,
+                Data=json.dumps(payload).encode(),
+            )
+        except apigw.exceptions.GoneException:
+            table.delete_item(Key={
+                'PK': f'TEAM#{team_id}',
+                'SK': f'CONN#{conn_id}',
+            })
+```
+
+---
+
+## SQS message format
+
+```json
+{
+  "team_id": "alpha",
+  "slot_id": "coder",
+  "user_id": "alice",
+  "agent_type": "coder",
+  "prompt": "Write a user creation function",
+  "connection_id": "abc123=",
+  "enqueued_at": "2026-09-18T10:30:00Z"
+}
+```
+
+`connection_id` is the requester's connection, used for directed replies. It may be stale by the time the runner executes — handle `GoneException` and continue.
+
+---
+
+## Agent tools
+
+| Tool | Input | Behaviour |
+|---|---|---|
+| `get_team_memory` | — | Read all `MEMORY#` rows; return as a context string prepended to the system prompt |
+| `set_team_memory` | `{key, val}` | Write a `MEMORY#` row; broadcast `memory_updated` |
+| `get_task_context` | `{user_id}` | Return the original prompt and relevant prior task history |
+
+Memory is loaded **before** the model call, not on demand, so a queued user's agent already knows the team's facts the moment it starts.
+
+---
+
+## Slot state machine
+
+```
+        claim_agent (atomic conditional update)
+IDLE ──────────────────────────────────────────► BUSY
+  ▲                                                │
+  │           agent task completes or fails        │
+  └────────────────────────────────────────────────┘
+                        │
+                        ▼
+        dispatch oldest QUEUE# item, if any
+```
+
+Invariants:
+- A slot is `BUSY` only with a non-null `current_user`.
+- A slot must be released even when the agent task **fails** — otherwise it leaks and the demo deadlocks. Wrap the runner body in try/finally.
+- Dispatching the next queued task happens after the release, in the same invocation.
