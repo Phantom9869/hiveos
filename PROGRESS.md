@@ -102,7 +102,37 @@ No traceback anywhere in the run.
 
 | Blocker | Blocks | Status |
 |---|---|---|
-| **No card on the AWS account — AWS Marketplace cannot subscribe Bedrock third-party models** | Phase 3 only | Needs the user to add a credit/debit card |
+| **Bedrock unusable — account-level zero quotas; card added and did NOT fix it** | Phase 3 only | Needs AWS Support. Assume Phase 3 falls back. |
+
+### ⛔ Card added 2026-09-18 — did not unblock Bedrock
+
+The user added a card. Verified in the console: **Visa •••• 3306, set as Default**; UPI AutoPay
+removed; billing address and contact email updated. The payment instrument is genuinely fixed.
+
+**Bedrock did not change.** Re-tested ~25 minutes after the card landed, well past the
+"try again after 2 minutes" window AWS's own error suggests:
+
+| Test | Result |
+|---|---|
+| Anthropic Haiku 4.5, us-east-1 | `INVALID_PAYMENT_INSTRUMENT` — unchanged |
+| Anthropic Haiku 4.5, us-west-2 | `INVALID_PAYMENT_INSTRUMENT` — identical |
+| Amazon Nova Lite / Micro, us-east-1 | `ThrottlingException: Too many tokens per day` |
+| Nova Lite without inference profile | `ThrottlingException` |
+| Per-day token quotas | **still 42 of 43 at zero, 0 adjustable** |
+| Marketplace active subscriptions | still 0 |
+| Retry poll, 10 attempts over 7 min (03:15–03:22Z) | `AccessDeniedException` every single time |
+
+**So the missing card was real but was not the root cause.** The deeper problem is the one
+that was visible all along and is not payment-related: **Amazon Nova is first-party, needs no
+Marketplace subscription and no payment instrument, and still hits a hard zero per-day quota.**
+A zero, non-adjustable per-day quota across 42 models is an **account-level Bedrock
+restriction** — most likely because the account is new (created 2026-04-27) and AISPL. No
+console setting changes it; `adjustable=False` means it cannot even be raised by request.
+
+**This is an AWS Support ticket, and support will not turn around before the 2026-09-20
+deadline. Plan Phase 3 on the fallback (`ARCHITECTURE.md` decision 7). Do not spend more
+session time re-testing Bedrock** — one quick converse call at the start of Phase 3 is enough
+to detect if it ever unlocks.
 
 ### ✅ CORRECTED DIAGNOSIS (2026-09-18, verified in the AWS Console)
 
