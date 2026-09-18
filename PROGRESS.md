@@ -390,6 +390,11 @@ Nothing on this list blocks the submission.
 
 ## Known issues and discoveries
 
+- **Amplify's `404-200` rule serves the right body with the wrong status.** A deep link like
+  `/some/deep/link` returns HTTP **404** but the body is `index.html`, so the app boots
+  normally. The custom rule is applied exactly as written (`aws amplify get-app --app-id
+  dbavt8jr66qxx --query 'app.customRules'` confirms it). Harmless for the MVP — there is one
+  route, `/`, and it returns a clean 200. Not worth a redeploy; do not chase it.
 - **`state_snapshot` is less detailed than the incremental events it replaces.** The re-sync
   pattern in `useHive.js` trades exactness for self-healing, and anything carried *only* on an
   incremental frame gets wiped when the snapshot lands. `estimated_wait_seconds` was the first
