@@ -264,7 +264,7 @@ export function SpendPanel({ spend, members, tokenBudget }) {
               <span className="spend__track">
                 <span
                   className="spend__fill"
-                  style={{ width: `${share}%`, background: look.hair }}
+                  style={{ '--share': share / 100, background: look.hair }}
                 />
               </span>
             </div>
