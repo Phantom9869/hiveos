@@ -76,7 +76,7 @@ Ship a **deployed, publicly reachable** workspace where three simultaneous brows
 
 ### Post-Hackathon
 
-Cognito authentication · team administration (ownership, invites, deletion) · priority queue bump · agent marketplace · usage analytics · per-user budgets
+Cognito authentication · user accounts · priority queue bump · agent marketplace · usage analytics · per-user budgets
 
 ### Out of scope — never build
 

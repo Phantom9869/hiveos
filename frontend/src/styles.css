@@ -1518,6 +1518,35 @@ body {
   color: var(--honey);
 }
 
+/* --- Workspace admin ------------------------------------------------------ */
+
+.admin__row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.admin__row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin__note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* Destructive, and it looks it. The only irreversible action in the product. */
+.btn--danger {
+  border-color: rgba(255, 92, 77, 0.45);
+  color: var(--alarm);
+}
+
+.btn--danger:hover {
+  background: rgba(255, 92, 77, 0.1);
+}
+
 /* --- Team chat ------------------------------------------------------------ */
 
 /* Inside the activity panel, not a block of its own: a chat message renders in

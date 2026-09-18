@@ -9,7 +9,7 @@ Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
 slots claimed, a third claim queued with a real position, auto-dispatch when a
 slot frees, and no slot leak when a task fails. Sections 13-18 cover shared
 memory, token accounting, and the enforced budget ceiling. 19 covers avatar
-presence and movement; 21 covers team isolation; 22 covers workspace passphrases; 20 covers fair queueing — that dispatch order follows
+presence and movement; 21 covers team isolation; 22 covers workspace passphrases; 23 covers administration; 20 covers fair queueing — that dispatch order follows
 who has waited longest rather than who arrived first, and that the position
 shown on the board is the one actually dispatched.
 
@@ -740,6 +740,7 @@ async def run_memory_and_budget(url):
     await run_fairness(url)
     await run_isolation(url)
     await run_passphrase(url)
+    await run_admin(url)
 
 
 
@@ -768,6 +769,95 @@ async def _join(url, user, team, passphrase=None):
         return await expect(ws, "state_snapshot", user)
     finally:
         await ws.close()
+
+
+
+# Created and deleted within the section, so it leaves nothing behind.
+ADMIN_TEAM = "smoke-admin"
+ADMIN_TOKEN = "smoke-owner-token-do-not-reuse"
+
+
+async def run_admin(url):
+    """Section 23: administration is enforced on the server.
+
+    The point of these checks is not that the buttons work — it is that hiding
+    them is *not* the control. A workspace with no accounts has no "who", so
+    rights hang off a secret the creator holds, and the server has to refuse a
+    frame from anyone who does not hold it. Every negative case below is a
+    client that asked politely and was told no.
+    """
+    print("\n23. Workspace administration — the Phase 11 gate")
+
+    owner = await websockets.connect(
+        f"{url}?user_id=owner&team={ADMIN_TEAM}"
+        f"&admin_token={urllib.parse.quote(ADMIN_TOKEN)}"
+    )
+    await owner.send(json.dumps({"action": "hello"}))
+    created = await expect(owner, "state_snapshot", "owner")
+    check(
+        "whoever creates a workspace administers it",
+        created.get("is_admin") is True and created.get("owned") is True,
+        f"is_admin={created.get('is_admin')} owned={created.get('owned')}",
+    )
+    check(
+        "**the admin salt and hash never reach a client**",
+        "admin_hash" not in json.dumps(created)
+        and "admin_salt" not in json.dumps(created),
+        "neither field present in state_snapshot",
+    )
+
+    member = await websockets.connect(f"{url}?user_id=member&team={ADMIN_TEAM}")
+    await member.send(json.dumps({"action": "hello"}))
+    plain = await expect(member, "state_snapshot", "member")
+    check(
+        "an ordinary member is not an administrator",
+        plain.get("is_admin") is False,
+        f"is_admin={plain.get('is_admin')}",
+    )
+
+    forger = await websockets.connect(
+        f"{url}?user_id=forger&team={ADMIN_TEAM}&admin_token=not-the-real-token"
+    )
+    await forger.send(json.dumps({"action": "hello"}))
+    forged = await expect(forger, "state_snapshot", "forger")
+    check(
+        "**a wrong admin token grants nothing**",
+        forged.get("is_admin") is False,
+        f"is_admin={forged.get('is_admin')}",
+    )
+
+    await drain(member)
+    await member.send(json.dumps({
+        "action": "admin_set_budget", "token_budget": 999999,
+    }))
+    refused = await expect(member, "error", "member")
+    check(
+        "**the server refuses a privileged action from a member — not the UI**",
+        "admin token" in (refused.get("message") or ""),
+        refused.get("message"),
+    )
+
+    await drain(member)
+    await owner.send(json.dumps({"action": "admin_set_budget", "token_budget": 4242}))
+    changed = await expect(member, "token_update", "member",
+                           where=lambda f: f.get("token_budget") == 4242)
+    check(
+        "the owner sets the budget and the whole workspace sees it",
+        changed.get("token_budget") == 4242,
+        f"budget={changed.get('token_budget')} seen by a member",
+    )
+
+    await owner.send(json.dumps({"action": "admin_delete_workspace"}))
+    gone = await expect(member, "workspace_deleted", "member")
+    check(
+        "deleting a workspace tells the people standing in it",
+        gone.get("team") == ADMIN_TEAM,
+        f"team={gone.get('team')}",
+    )
+
+    for ws in (owner, member, forger):
+        await ws.close()
+    await asyncio.sleep(3)
 
 
 async def run_passphrase(url):

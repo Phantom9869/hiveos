@@ -29,6 +29,24 @@ const DEFAULT_TEAM = 'alpha'
 const MAX_PROMPT = 2000
 const MAX_TEXT = 500
 
+/* One admin token per workspace, per browser, kept for as long as the browser
+ * keeps anything. Generated with the platform CSPRNG rather than Math.random —
+ * this is the only thing standing between a stranger and deleting a workspace.
+ */
+function adminTokenFor(teamId) {
+  const key = `hiveos.admin.${teamId}`
+  try {
+    const existing = window.localStorage.getItem(key)
+    if (existing) return existing
+    const minted = crypto.randomUUID()
+    window.localStorage.setItem(key, minted)
+    return minted
+  } catch {
+    // A blocked localStorage means no admin rights rather than no entry.
+    return null
+  }
+}
+
 function loadIdentity() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY)
@@ -65,7 +83,13 @@ function Gate({ onEnter }) {
     // Lowercased to match the server: `Alpha` and `alpha` must be one room,
     // not two that look identical and cannot see each other.
     const teamId = team.trim().toLowerCase().slice(0, MAX_TEAM) || DEFAULT_TEAM
-    onEnter({ userId, avatar, team: teamId, passphrase })
+    // Minted here, kept here. If this workspace is new, the server stores a
+    // hash of it and this browser becomes its administrator; if it already
+    // exists, the token simply will not match and nothing is granted. Sharing
+    // it with a teammate is what an invite is — there are no accounts to
+    // invite anyone *to*.
+    const adminToken = adminTokenFor(teamId)
+    onEnter({ userId, avatar, team: teamId, passphrase, adminToken })
   }
 
   return (
@@ -292,11 +316,134 @@ function ChatComposer({ hive }) {
   )
 }
 
+
+/* --- Administration ------------------------------------------------------- */
+
+/* Shown only to a connection the *server* admitted as an administrator.
+ *
+ * Hiding it is convenience, not the control: every action below is refused
+ * server-side against the CONN# row unless this connection presented the
+ * workspace's admin token at the handshake. A user who un-hid this panel in
+ * devtools would get three error frames.
+ */
+function AdminPanel({ hive }) {
+  const [budget, setBudget] = useState('')
+  const [passphrase, setPassphrase] = useState('')
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+
+  if (!hive.board.is_admin) return null
+
+  const applyBudget = (event) => {
+    event.preventDefault()
+    const value = Number(budget)
+    if (!Number.isFinite(value) || value < 0) return
+    if (hive.setBudget(Math.round(value))) setBudget('')
+  }
+
+  return (
+    <section className="panel panel--admin" aria-labelledby="admin-label">
+      <div className="panel__head">
+        <span className="panel__label" id="admin-label">
+          Workspace admin
+        </span>
+        <span className="panel__aside">you own this</span>
+      </div>
+
+      <form className="admin__row" onSubmit={applyBudget}>
+        <input
+          className="field"
+          value={budget}
+          onChange={(event) => setBudget(event.target.value)}
+          placeholder={`${hive.board.token_budget} tokens`}
+          inputMode="numeric"
+          aria-label="New token budget"
+        />
+        <button className="btn btn--ghost" type="submit" disabled={!budget.trim()}>
+          Set budget
+        </button>
+      </form>
+
+      <form
+        className="admin__row"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (hive.rotatePassphrase(passphrase)) setPassphrase('')
+        }}
+      >
+        <input
+          className="field"
+          type="password"
+          value={passphrase}
+          onChange={(event) => setPassphrase(event.target.value)}
+          placeholder="new passphrase"
+          autoComplete="off"
+          aria-label="New workspace passphrase"
+        />
+        <button className="btn btn--ghost" type="submit">
+          {passphrase ? 'Set' : 'Remove'}
+        </button>
+      </form>
+
+      <p className="admin__note">
+        Rotating locks out the next person to join. Everyone already here stays.
+      </p>
+
+      {confirmingDelete ? (
+        <div className="admin__row">
+          <button
+            className="btn btn--danger"
+            type="button"
+            onClick={() => hive.deleteWorkspace()}
+          >
+            Delete everything
+          </button>
+          <button
+            className="btn btn--ghost"
+            type="button"
+            onClick={() => setConfirmingDelete(false)}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          className="btn btn--ghost"
+          type="button"
+          onClick={() => setConfirmingDelete(true)}
+        >
+          Delete workspace…
+        </button>
+      )}
+    </section>
+  )
+}
+
 /* --- Workspace ------------------------------------------------------------ */
+
+function Deleted() {
+  return (
+    <main className="gate">
+      <div className="gate__card">
+        <div className="gate__head">
+          <Mark className="gate__mark" />
+          <h1 className="gate__title">Workspace deleted</h1>
+          <p className="gate__blurb">
+            Its budget, slots, queue, memory and task history are gone. Reload
+            to start a new workspace with the same name.
+          </p>
+        </div>
+      </div>
+    </main>
+  )
+}
 
 function Workspace({ identity }) {
   const hive = useHive(identity)
   const { board } = hive
+
+  // Terminal state, checked before anything else renders: there is no board
+  // left to draw and nothing to reconnect to.
+  if (hive.deleted) return <Deleted />
 
   // Who is mid-task, so the floor can mark them working. Derived from the slot
   // table rather than tracked separately — the slots are the authority on who
@@ -365,6 +512,8 @@ function Workspace({ identity }) {
         members={board.members}
         tokenBudget={board.token_budget}
       />
+
+      <AdminPanel hive={hive} />
 
       <RequestPanel hive={hive} />
 

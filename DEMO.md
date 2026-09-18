@@ -14,9 +14,24 @@ Run that first. If it fails, do not record — fix what it names.
 
 ## Before you hit record
 
+**Record in a private workspace, not the default one.** The public URL has real
+visitors now — one of them walked into the middle of a rehearsal and appeared in
+a member list a take was asserting on. A passphrase-protected workspace cannot
+be joined by someone who happens to be reading the README.
+
 ```bash
-./scripts/reset-demo.sh          # clean board, SQS drained, Lambdas warm, verified
+export DEMO_TEAM=demo-stage
+export DEMO_PASSPHRASE='pick something'
+
+python scripts/rehearse.py --takes 2   # rehearses in that workspace
+./scripts/reset-demo.sh                # clean board, SQS drained, Lambdas warm, verified
 ```
+
+Both scripts honour those two variables. Unset, everything behaves exactly as
+before and uses the open default workspace.
+
+At the gate, each browser enters the same **workspace** name and the same
+**passphrase**. The first one in creates it and becomes its administrator.
 
 It prints `snapshot clean — both slots IDLE, 0/5000 tokens, queue and memory empty`. If it
 prints `DIRTY`, or warns that connection rows were live, **close every browser tab pointed at
@@ -36,7 +51,8 @@ Then:
 - [ ] Each window is a **separate browser or profile**. The entry gate persists to
       `localStorage['hiveos.identity']`, so two tabs of the same origin share one identity and
       you will end up with three "Alice"s.
-- [ ] Identities entered: **alice 🐝**, **bob 🦊**, **charlie 🦉**
+- [ ] Identities entered: **alice 🐝**, **bob 🦊**, **charlie 🦉** — all in the same
+      workspace, with the same passphrase
 - [ ] All three show the same meter — `0 / 5000` — and both slots IDLE
 - [ ] **Browser extensions disabled, or record in a clean profile.** Grammarly injects a
       floating icon *into the prompt textarea* and it is clearly visible on camera. Found while

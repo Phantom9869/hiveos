@@ -42,6 +42,7 @@
 | 8 | Depth pass — identity, full screen, ledger, fairness, tools | `COMPLETE` — 2026-09-18 |
 | 9 | Per-team isolation | `COMPLETE` — 2026-09-18 |
 | 10 | Workspace passphrases | `COMPLETE` — 2026-09-18 |
+| 11 | Workspace administration | `COMPLETE` — 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
@@ -66,6 +67,60 @@ the only place the agent differs in *kind* from the Phase 3 design.
 ---
 
 ## Completed
+
+**Phase 11 — 2026-09-18 — workspace administration**
+
+**The blocker was named before building: you cannot have owners without
+identities.** A display name is something anyone can type at the gate, so an
+owner identified by name would be enforceable in the UI and nowhere else.
+Administration therefore hangs off a secret the creator holds. Sharing that
+secret is what an invite is here — the honest mechanism available without
+accounts, and saying so beats pretending otherwise.
+
+Three actions, the ones a governance product actually needs: set the budget,
+rotate the passphrase, delete the workspace.
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **79/79** (seven new admin checks) |
+| `rehearse.py --takes 2` | ✅ 12/12 twice, default **and** private workspace |
+| Creator becomes administrator | ✅ |
+| Ordinary member | ✅ not an administrator |
+| Forged admin token | ✅ grants nothing |
+| **Server refuses a member's privileged action** | ✅ not the UI hiding it |
+| Owner sets budget | ✅ 4242, seen by every member |
+| Delete | ✅ every row gone, members told |
+| Admin salt/hash reaching a client | ✅ never |
+
+**Decisions worth keeping:**
+
+- **The token is minted by the client, never returned by the server.** Whoever
+  creates a workspace already holds it, so there is nothing to hand back and no
+  window in which it could be intercepted.
+- **Rights are decided at the handshake and stored as `is_admin` on the `CONN#`
+  row.** Admin frames check the row, not the message — the same rule that makes
+  `user_id` trustworthy.
+- **`admin_delete_workspace` collects its audience before deleting**, because
+  `broadcast_to_team` finds recipients by reading the `CONN#` rows the delete
+  removes. Caught while writing it, not after.
+
+**A stranger walked into a rehearsal, and that turned out to matter.** The
+public URL has real visitors now — `Kamal` appeared in a member list a take was
+asserting on. Two real bugs surfaced from chasing it, both introduced by team
+isolation and both invisible until a second workspace existed:
+
+1. `reset-demo.sh` seeded the workspace it was told to and then **verified a
+   different one** — its probe connected without a team, landing in the
+   default. It reported another board's tokens and members as though they were
+   yours.
+2. `rehearse.py` read `TEAM#alpha` straight from DynamoDB while driving a
+   different workspace over the socket, so it compared one board's row against
+   another board's snapshot.
+
+Both are the same shape: a team-aware write paired with a team-blind read.
+`DEMO_TEAM` and `DEMO_PASSPHRASE` now steer both scripts, and `DEMO.md` says to
+record in a protected workspace — which is the actual fix for strangers on the
+public URL.
 
 **Phase 10 — 2026-09-18 — workspace passphrases (not Cognito)**
 

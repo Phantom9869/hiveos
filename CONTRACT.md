@@ -127,6 +127,36 @@ Whoever creates it sets it; it is never changed afterwards by this code.
   to open the board cold. `ws_smoke.py` asserts the open case as hard as the
   closed one.
 
+### Workspace administration
+
+Whoever creates a workspace may also present an `admin_token`; its hash is
+stored the same way a passphrase's is. **There are no accounts, so rights hang
+off a secret the creator holds, not off a display name anyone could type.**
+Sharing that secret is what an invite is here.
+
+| Field on METADATA | Meaning |
+|---|---|
+| `admin_salt` / `admin_hash` | PBKDF2 of the admin token. Absent on a workspace with no owner |
+
+| Client action | Effect |
+|---|---|
+| `admin_set_budget` | `{token_budget}` — broadcasts `token_update` to the whole workspace |
+| `admin_rotate_passphrase` | `{passphrase}` — empty removes protection. Locks out the *next* joiner; everyone already connected stays |
+| `admin_delete_workspace` | Deletes every row the workspace owns, including its members' `CONN#/TEAM` index rows, then sends `workspace_deleted` |
+
+- **The token is minted by the client and never returned by the server.**
+  Whoever creates a workspace already holds it, so there is nothing to hand
+  back and no window in which it could be intercepted.
+- **Rights are decided once, at the handshake, and stored as `is_admin` on the
+  `CONN#` row.** Admin actions check the row, not the frame — the same rule
+  that makes `user_id` trustworthy. A client cannot grant itself rights by
+  adding a field to a message.
+- **`state_snapshot` carries `owned` and `is_admin` as booleans, never the salt
+  or hash.**
+- **`admin_delete_workspace` collects its audience before deleting.**
+  `broadcast_to_team` finds recipients by reading `CONN#` rows, which the
+  delete removes — broadcasting afterwards would reach nobody.
+
 PBKDF2 rather than argon2 or bcrypt because it is in the standard library —
 Lambda has neither without a layer, and a layer for one function costs more
 than it buys here. 100k iterations is ~50ms, paid once per handshake and never

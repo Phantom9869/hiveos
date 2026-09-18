@@ -27,12 +27,17 @@ import os
 import subprocess
 import sys
 import time
+import urllib.parse
 
 import websockets
 
 STACK = "hiveos"
 REGION = "us-east-1"
-TEAM_PK = "TEAM#alpha"
+# Derived from TEAM below, not hardcoded: this reads the board the rehearsal
+# is actually running in, and a fixed `TEAM#alpha` silently compared one
+# workspace's DynamoDB row against another workspace's snapshot.
+def team_pk():
+    return f"TEAM#{TEAM}"
 RECV_TIMEOUT = 25
 
 # The fact Alice saves on camera. Short enough to read on a 640px window.
@@ -50,6 +55,24 @@ DEMO_BUDGET_SECONDS = 110
 # ceiling and fails two checks for reasons that have nothing to do with the
 # code. Restored unconditionally when this script exits.
 STANDARD_BUDGET = 5000
+
+# Which workspace to rehearse in, and how to get into it. Defaults keep the
+# behaviour every earlier run had.
+#
+# This exists because a stranger walked into the middle of a rehearsal: the
+# public URL has real visitors now, they land in the default workspace, and one
+# of them showed up in the member list a take was asserting on. Recording in a
+# passphrase-protected workspace is the fix, and the harness has to be able to
+# go there too.
+TEAM = os.environ.get("DEMO_TEAM", "alpha")
+PASSPHRASE = os.environ.get("DEMO_PASSPHRASE", "")
+
+
+def ws_url(url, user_id, **extra):
+    query = {"user_id": user_id, "team": TEAM, **extra}
+    if PASSPHRASE:
+        query["passphrase"] = PASSPHRASE
+    return f"{url}?{urllib.parse.urlencode(query)}"
 
 results = []
 timings = []
@@ -110,7 +133,7 @@ def stack_output(key):
 def metadata_row():
     page = aws(
         "dynamodb", "get-item", "--table-name", "hiveos-state",
-        "--key", json.dumps({"PK": {"S": TEAM_PK}, "SK": {"S": "METADATA"}}),
+        "--key", json.dumps({"PK": {"S": team_pk()}, "SK": {"S": "METADATA"}}),
     )
     item = page.get("Item") or {}
     return (
@@ -132,7 +155,7 @@ def reset(budget):
     # will never see, and hide warm-path regressions behind the noise.
     proc = subprocess.run(
         ["./scripts/reset-demo.sh"],
-        env={**os.environ, "TOKEN_BUDGET": str(budget)},
+        env={**os.environ, "TOKEN_BUDGET": str(budget), "TEAM_ID": TEAM, "DEMO_PASSPHRASE": PASSPHRASE},
         capture_output=True, text=True,
     )
     if proc.returncode != 0:
@@ -152,7 +175,7 @@ def restore_standard_budget(used_budget):
     print(f"\n-- restoring the standard board (budget {STANDARD_BUDGET}) --")
     subprocess.run(
         ["./scripts/seed.sh"],
-        env={**os.environ, "TOKEN_BUDGET": str(STANDARD_BUDGET)},
+        env={**os.environ, "TOKEN_BUDGET": str(STANDARD_BUDGET), "TEAM_ID": TEAM, "DEMO_PASSPHRASE": PASSPHRASE},
         capture_output=True, text=True, check=True,
     )
     print(f"   budget back to {STANDARD_BUDGET}; ws_smoke.py will behave")
@@ -217,9 +240,9 @@ async def snapshot(ws, who):
 
 async def run_demo(url):
     """The 0:25-2:15 stretch of the recorded script, in recording order."""
-    alice = await websockets.connect(f"{url}?user_id=alice&avatar=%F0%9F%90%9D")
-    bob = await websockets.connect(f"{url}?user_id=bob&avatar=%F0%9F%A6%8A")
-    charlie = await websockets.connect(f"{url}?user_id=charlie&avatar=%F0%9F%A6%89")
+    alice = await websockets.connect(ws_url(url, "alice", avatar="\U0001f41d"))
+    bob = await websockets.connect(ws_url(url, "bob", avatar="\U0001f98a"))
+    charlie = await websockets.connect(ws_url(url, "charlie", avatar="\U0001f989"))
 
     try:
         with Beat("BEAT 1 (0:25) — three browsers, one workspace"):
@@ -359,7 +382,7 @@ async def run_demo(url):
             # billed usage. Which way this flag falls decides a line of
             # narration, so it is reported loudly rather than merely asserted
             # — see DEMO.md, "what to say about the token counts".
-            cold = await websockets.connect(f"{url}?user_id=judge")
+            cold = await websockets.connect(ws_url(url, "judge"))
             cold_snap = await snapshot(cold, "judge")
             await cold.close()
             estimated = cold_snap.get("usage_estimated")
@@ -390,8 +413,8 @@ async def run_demo(url):
 async def run_ceiling(url):
     """The budget-refusal beat. Needs its own near-spent board, so it is a
     separate take rather than part of the main sequence."""
-    alice = await websockets.connect(f"{url}?user_id=alice")
-    bob = await websockets.connect(f"{url}?user_id=bob")
+    alice = await websockets.connect(ws_url(url, "alice"))
+    bob = await websockets.connect(ws_url(url, "bob"))
     try:
         await snapshot(alice, "alice")
         await drain(alice)
