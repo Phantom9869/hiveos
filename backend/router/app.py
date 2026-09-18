@@ -61,11 +61,26 @@ def _on_connect(event, connection_id):
     user_id = (params.get("user_id") or f"guest-{connection_id[:6]}").strip()[:MAX_USER_ID]
     avatar = (params.get("avatar") or "\U0001f41d")[:8]
     team = state.clean_team(params.get("team"))
+    passphrase = params.get("passphrase")
 
     # A team nobody has joined before has no budget and no slots. Create them
     # before the member row, so the first person to arrive sees a working board
-    # rather than an empty one.
-    state.ensure_team(team)
+    # rather than an empty one. Whoever creates a workspace sets its passphrase;
+    # this is a no-op on one that already exists.
+    state.ensure_team(team, passphrase)
+
+    if not state.passphrase_ok(team, passphrase):
+        # Refused at the handshake, so no socket and no CONN# row ever exist.
+        # The alternative — accept, send an error frame, then close — leaves a
+        # connected socket with no team binding for as long as it takes to shut
+        # down, and a frame sent in that window resolves to the default
+        # workspace. Cheaper to never let it open.
+        #
+        # Deliberately not logging the passphrase, or whether it was merely
+        # absent versus wrong: neither helps debugging and both end up in
+        # CloudWatch.
+        print(f"[connect] REFUSED connection={connection_id} team={team} — passphrase")
+        return {"statusCode": 403}
 
     member = state.add_connection(team, connection_id, user_id, avatar)
     print(f"[connect] connection={connection_id} user={user_id} team={team}")

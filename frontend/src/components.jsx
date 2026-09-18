@@ -50,6 +50,7 @@ const LAMP_TEXT = {
   connecting: 'connecting',
   open: 'live',
   reconnecting: 'reconnecting',
+  refused: 'locked',
   closed: 'offline',
 }
 

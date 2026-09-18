@@ -58,7 +58,7 @@ Measured against the deployed system, not localhost:
 | A claim reaching a second browser | **282 ms** |
 | Auto-dispatch visible after a slot frees | **187 ms** |
 | An avatar move painted on a second browser | **270–294 ms** |
-| End-to-end checks against real AWS | **66/66** (`scripts/ws_smoke.py`) |
+| End-to-end checks against real AWS | **72/72** (`scripts/ws_smoke.py`) |
 | Rehearsed demo sequence | **12/12**, two consecutive unattended takes (`scripts/rehearse.py`) |
 
 Timings are click-to-paint across two separate browsers — a 20 ms DOM sampler in the *observing*

@@ -55,6 +55,7 @@ function saveIdentity(identity) {
 function Gate({ onEnter }) {
   const [name, setName] = useState('')
   const [team, setTeam] = useState(DEFAULT_TEAM)
+  const [passphrase, setPassphrase] = useState('')
   const [avatar, setAvatar] = useState(AVATARS[0])
 
   const submit = (event) => {
@@ -64,7 +65,7 @@ function Gate({ onEnter }) {
     // Lowercased to match the server: `Alpha` and `alpha` must be one room,
     // not two that look identical and cannot see each other.
     const teamId = team.trim().toLowerCase().slice(0, MAX_TEAM) || DEFAULT_TEAM
-    onEnter({ userId, avatar, team: teamId })
+    onEnter({ userId, avatar, team: teamId, passphrase })
   }
 
   return (
@@ -117,6 +118,27 @@ function Gate({ onEnter }) {
             </p>
           </div>
 
+          <div>
+            <label className="gate__legend" htmlFor="passphrase">
+              Passphrase <span className="gate__optional">optional</span>
+            </label>
+            <input
+              id="passphrase"
+              className="field"
+              type="password"
+              value={passphrase}
+              onChange={(event) => setPassphrase(event.target.value)}
+              maxLength={200}
+              autoComplete="off"
+              aria-describedby="pass-hint"
+            />
+            <p className="gate__hint" id="pass-hint">
+              Set one when you create a workspace and it stays protected —
+              everyone joining it afterwards needs the same passphrase. Leave
+              blank for an open workspace.
+            </p>
+          </div>
+
           <fieldset style={{ border: 0, margin: 0, padding: 0 }}>
             <legend className="gate__legend">Your marker</legend>
             <div className="chips">
@@ -147,6 +169,13 @@ function Gate({ onEnter }) {
 /* --- Request panel -------------------------------------------------------- */
 
 function hintFor({ connection, budgetExhausted, holding, queued }) {
+  if (connection === 'refused') {
+    return {
+      text: 'This workspace is protected and the passphrase did not match. '
+        + 'Reload to try again.',
+      alarm: true,
+    }
+  }
   if (connection !== 'open') {
     return { text: 'Reconnecting. The board catches up on its own.', alarm: false }
   }
