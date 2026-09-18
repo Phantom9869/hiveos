@@ -14,12 +14,17 @@
 | **Project** | HiveOS — OS-style scheduler for a team's shared AI agent budget |
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
-| **Current phase** | **Phase 3 — Bedrock + agent + memory** |
-| **Phase status** | `NOT STARTED` — see the Bedrock blocker before starting |
-| **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. |
+| **Current phase** | **Phase 5 — agent chat + 2D canvas (cuttable)** |
+| **Phase status** | `NOT STARTED`. Phase 4 complete; **Phase 3 deferred, not done** |
+| **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. Frontend live on Amplify. |
+| **🌐 Public URL** | **https://main.dbavt8jr66qxx.amplifyapp.com** — verified cold, zero setup |
 | **WebSocket endpoint** | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
+| **Amplify app** | `dbavt8jr66qxx`, branch `main` — **not in CloudFormation** (see below) |
 | **Repository** | https://github.com/arunishrajput/hiveos (public, `main`) |
 | **AWS account** | `890608337320` · `us-east-1` · IAM user `hiveos-dev` (AdministratorAccess) |
+
+> **There is a submittable deliverable as of now.** The Phase 4 gate — a deployed public URL
+> showing live shared state — is met. Everything remaining is enhancement.
 
 ---
 
@@ -30,14 +35,72 @@
 | 0 | Pre-project setup | `COMPLETE` (Bedrock deferred — see below) |
 | 1 | WebSocket backbone | `COMPLETE` |
 | 2 | Scheduler + queue (no LLM) | `COMPLETE` |
-| 3 | Bedrock + agent + memory | `AT RISK` — blocked on account tier ← **next** |
-| 4 | Frontend HUD + public URL | `NOT STARTED` |
-| 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` |
+| 3 | Bedrock + agent + memory | `DEFERRED` — blocked on an account-level Bedrock restriction |
+| 4 | Frontend HUD + public URL | `COMPLETE` |
+| 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` ← **next**, or cut |
 | 6 | Demo readiness | `NOT STARTED` |
+
+**Phase 3 was skipped deliberately** (user decision, 2026-09-18), on the reasoning already
+recorded below: Phase 4 produces the submission, the stub agent exercises the entire
+queue/slot/broadcast path without a single Bedrock call, and the blocker needs an AWS Support
+ticket that will not turn around before the deadline. Shipping Phase 4 on the stub was strictly
+safer than blocking. **Phase 3 is deferred, not cancelled** — if Bedrock ever unlocks it drops
+into one function.
 
 ---
 
 ## Completed
+
+**Phase 4 — 2026-09-18 — Frontend HUD and public URL**
+
+- Vite + React app in `frontend/`. No Tailwind, no component library, no router, no state
+  library — React plus one CSS file. 74 KB gzipped JS, 444 KB total.
+- `src/useHive.js` — the WebSocket client. Owns all board state, applies every server event in
+  `CONTRACT.md`, reconnects with 1/2/4/8s backoff, re-sends `hello` on reconnect.
+- `src/components.jsx` — quota strip, slot cards, run queue, activity log, team memory.
+- `src/App.jsx` — entry gate (name + marker, persisted to localStorage), request form, layout.
+- `scripts/deploy-frontend.sh` — idempotent Amplify manual-mode deploy. Resolves the WebSocket
+  URL from the stack output, builds, **greps the bundle to prove the URL actually got baked in**,
+  zips, finds-or-creates app and branch, uploads, starts, and polls to `SUCCEED`.
+- Amplify app `dbavt8jr66qxx` created with an SPA rewrite (`/<*>` → `/index.html`, 404-200).
+
+**Verified against the deployed public URL, not exit codes:**
+
+| Check | Result |
+|---|---|
+| Public HTTPS URL opens cold with zero setup | ✅ |
+| Board renders entirely from one `state_snapshot` | ✅ |
+| Zero console errors or warnings on the deployed page | ✅ |
+| **Claim propagates to a second browser in 282 ms** (gate allows ~2 s) | ✅ Phase 4 gate |
+| Same, measured localhost → public Amplify origin | ✅ 282 ms |
+| Both slots BUSY + a real server-assigned queue position rendered | ✅ |
+| **Auto-dispatch visible in the UI 160 ms after a slot freed** | ✅ Phase 4 gate |
+| Meter thresholds at 49.9/50.0/80.0/80.1/100 % → jade/amber/amber/coral/coral | ✅ |
+| Quota strip fill stays tick-aligned with the track at every width | ✅ |
+| `python scripts/ws_smoke.py` — backend regression | ✅ 29/29 |
+
+Measured by installing a 20 ms DOM sampler in the *observing* browser and comparing its
+absolute timestamps against the acting browser's click — so the figures are click-to-paint
+across two clients, not a server-side round trip.
+
+**Two real frontend bugs found and fixed:**
+
+1. **A user dropped themselves from their own member list.** Membership is per-connection
+   server-side (one `CONN#` row each), but `user_left` carries only `user_id`. Two connections
+   for one person collapsed into a single member entry, so closing one tab removed them
+   entirely while their own socket was still live. The member count is on screen for the whole
+   recording, so this would have shown. Fixed by deduping members by `user_id` and adding
+   `user_joined`/`user_left` to the re-sync set so the authoritative snapshot corrects any
+   collapse.
+
+2. **The queue ETA was erased ~500 ms after appearing.** `queue_update` carries
+   `estimated_wait_seconds`; `state_snapshot.queue[]` does not (`state.py` `queue_view`,
+   `CONTRACT.md`). The debounced re-sync therefore overwrote a correct `~8s` with `—`. Caught
+   on the timestamped trace at exactly the 460 ms mark. Fixed by deriving the ETA from
+   `queue_position` client-side — the server's figure is exactly
+   `position * ESTIMATED_TASK_SECONDS`, so this is equivalent rather than an approximation, and
+   it additionally gives a user who *reconnects while queued* an ETA the snapshot alone could
+   not supply.
 
 **Phase 2 — 2026-09-18**
 
@@ -137,7 +200,26 @@ No traceback anywhere in the run.
 
 | Blocker | Blocks | Status |
 |---|---|---|
-| **Bedrock unusable — account-level zero quotas; card added and did NOT fix it** | Phase 3 only | Needs AWS Support. Assume Phase 3 falls back. |
+| **Bedrock unusable — account-level zero quotas; card added and did NOT fix it** | Phase 3 only | Needs AWS Support. Phase 3 deferred; Phase 4 shipped on the stub. |
+
+### What the Bedrock blocker actually costs the demo
+
+Now that the HUD is live, the consequence is concrete and worth being honest about on camera:
+
+- **The token meter renders correctly but never moves on its own.** The stub agent reports
+  `tokens_used_this_call: 0` and nothing broadcasts `token_update`, so the quota strip sits at
+  `0 / 1,000,000` for the whole demo. The client-side handler for `token_update` is implemented
+  and correct per `CONTRACT.md`, but **no server code path emits that event yet** — it arrives
+  with Phase 3. The meter's thresholds and geometry were verified by rendering the real
+  component against the built CSS at nine percentages; the live tick is what is missing.
+- **Team memory never populates**, so the memory panel stays hidden (it renders only when there
+  are facts). The "Alice saves a fact, Charlie's agent already knows it" beat in the demo script
+  cannot be shown.
+- **`budget_exhausted` cannot be demonstrated end to end**, because nothing spends tokens.
+
+Everything else in the demo script — the shared board, the slot lifecycle, the real queue
+position, auto-dispatch — is live and recorded above. Per `PRD.md`, the honest framing is
+fallback ladder rung 3: *mock agent responses, stated plainly.*
 
 ### ⛔ Card added 2026-09-18 — did not unblock Bedrock
 
@@ -292,22 +374,38 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Manual actions pending
 
-1. **Add a credit or debit card to the AWS account.** There is no Paid Plan upgrade to do —
-   that theory was checked in the console and disproved. The card is the whole blocker.
-   - `https://console.aws.amazon.com/billing/home#/paymentpreferences` → **Add payment
-     method** → card. UPI AutoPay is currently the only method and AWS Marketplace does not
-     accept it.
-   - Claude cannot do this step — entering payment credentials is off-limits.
-   - Verify: `aws bedrock-runtime converse --region us-east-1 --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 --messages '[{"role":"user","content":[{"text":"Say OK"}]}]' --inference-config '{"maxTokens":10}'`
-     must return a completion, not `INVALID_PAYMENT_INSTRUMENT` or `ThrottlingException`.
-   - Unblocks Phase 3 only. Phase 2 does not need it.
-2. **Confirm AWS Budget notification email** — check `arunishrajput7@gmail.com` for the
+> The "add a card" action that used to sit here is **done** — Visa •••• 3306 is on the account
+> and set as default. It did not unblock Bedrock. Do not repeat it.
+
+1. **Confirm AWS Budget notification email** — check `arunishrajput7@gmail.com` for the
    `hiveos-guardrail` subscription confirmation.
+2. **Optional, Phase 3 only: open an AWS Support case** about the account-level Bedrock
+   restriction (42 of 43 per-day token quotas at zero, `adjustable=False`, first-party Amazon
+   Nova included). Will not turn around before 2026-09-20, so this is for after the hackathon.
+   Nothing in the remaining plan waits on it.
+
+Nothing on this list blocks the submission.
 
 ---
 
 ## Known issues and discoveries
 
+- **`state_snapshot` is less detailed than the incremental events it replaces.** The re-sync
+  pattern in `useHive.js` trades exactness for self-healing, and anything carried *only* on an
+  incremental frame gets wiped when the snapshot lands. `estimated_wait_seconds` was the first
+  casualty. Before adding a field to an incremental event, check whether the snapshot carries it
+  too — or derive it client-side.
+- **Membership is per-connection, but `user_left` is per-user.** Anyone with two tabs breaks a
+  naive client-side member list. Deduped by `user_id` in `useHive.js`; see the Phase 4 bugs.
+- **The frontend's `ESTIMATED_TASK_SECONDS` must track `scheduler.py`'s.** Two copies of the
+  same constant in two languages. If the backend's estimate is retuned (Phase 3 should, once
+  real Bedrock latency is known), `frontend/src/useHive.js` has to change in the same commit.
+- **No `StrictMode` in `main.jsx`, on purpose.** Its dev-only double render opens two
+  WebSockets and writes two `CONN#` rows, which makes the member count lie while developing.
+- **`claimed_at` is not in `state_snapshot`.** A cold client cannot know how long a BUSY slot
+  has been running, which is why the slot cards show a pulsing indicator and no elapsed timer —
+  a timer would read differently on a browser that watched the transition than on one that
+  joined mid-task, and "identical on every screen" is the whole claim.
 - **Broadcast the state change before dispatching to SQS.** See the Phase 2 bug above. The
   general rule: a frame describing committed state must go out before the work that could
   produce the *next* frame. `CONTRACT.md` → *Frame ordering*.
@@ -373,29 +471,52 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 | Router Lambda `hiveos-router` | ✅ verified end to end |
 | SQS `hiveos-agent-tasks` + DLQ | ✅ both empty, nothing dead-lettered |
 | Agent Runner `hiveos-agent-runner` | ✅ verified end to end (stub agent) |
-| Amplify app / public URL | ❌ Phase 4 |
+| Amplify app `hiveos` / public URL | ✅ `dbavt8jr66qxx` → https://main.dbavt8jr66qxx.amplifyapp.com |
+
+**The Amplify app is not managed by CloudFormation.** This is deliberate and matches
+`BUILD_PLAN.md` Phase 4 task 5 and `DEPLOYMENT.md`: manual-deploy mode needs no GitHub OAuth
+and no build service role, which makes it fully scriptable. The consequence is that
+`describe-stacks` will never mention it — `scripts/deploy-frontend.sh` finds it by **name**
+(`hiveos`) so repeat runs across `/clear` sessions reuse it instead of creating duplicates.
+`sam delete` will not remove it; teardown needs `aws amplify delete-app --app-id dbavt8jr66qxx`.
 
 ---
 
 ## Next recommended action
 
-**Start Phase 3 — Bedrock, agent, and memory**, but read the Bedrock blocker above first.
+**Go to Phase 6 — demo readiness. Skip Phase 5.**
 
-Open with one `bedrock-runtime converse` call to see whether the account ever unlocked. Do
-not spend more than that on re-testing — the evidence says it is an account-level
-restriction needing AWS Support, which will not turn around before 2026-09-20.
+There is a submittable deliverable right now, and `BUILD_PLAN.md` is explicit that Phase 5 is
+the first thing to cut and that nothing downstream depends on it. With the deadline on
+2026-09-20 and the video being the only judge touchpoint, rehearsing and recording beats adding
+a 2D canvas.
 
-**If Bedrock is still blocked, skip to Phase 4 and come back.** Phase 4 is the real gate:
-it produces the deployed public URL, which is the submission. The stub agent already
-returns a response over the full queue/slot path, so the HUD can be built and demoed
-against it without a single Bedrock call. Shipping Phase 4 on the stub and adding Bedrock
-later is strictly safer than blocking on an AWS Support ticket.
+**But consider this Phase-3-without-Bedrock slice first (~1 session), because it buys demo
+beats that Phase 5 does not:**
 
-Phase 3 work that needs no Bedrock and can be done either way:
-- `backend/shared/memory.py` and the `MEMORY#` rows
+- `backend/shared/memory.py` + the `MEMORY#` rows
 - `get_team_memory` / `set_team_memory` and the `memory_updated` broadcast
-- The budget ceiling check and `budget_exhausted` — testable by setting `tokens_used` to
-  the ceiling by hand
+- The budget ceiling check and `budget_exhausted`
 
-`_run_agent` in `backend/agent_runner/app.py` is the single seam Bedrock drops into.
-Nothing else in the runner changes.
+None of these need a model call. The frontend **already renders all three** (memory panel,
+`memory_updated` handler, `budget_exhausted` handler and the alarm state) — they are dark only
+because no server path emits them. Wiring them up would restore the memory beat from the demo
+script and make the enforced ceiling demonstrable, which is the single most distinctive claim
+in `PRD.md`. A `set_team_memory` triggered by a keyword in the stub agent's prompt would be
+enough, and honest, as long as the video says the agent is stubbed.
+
+Weigh that against simply recording now. **Recording something that works outranks both.**
+
+If Bedrock is ever unblocked: open with one `bedrock-runtime converse` call and nothing more —
+the evidence says it needs AWS Support. `_run_agent` in `backend/agent_runner/app.py` is the
+single seam it drops into; nothing else in the runner changes.
+
+### Before recording
+
+- `./scripts/seed.sh` resets the board to a clean demo state.
+- Pre-warm both Lambdas — a cold Router adds visible latency to the first claim.
+- Three browsers at ~640 px wide each is the layout the HUD was designed for; it fits without
+  scrolling at 640×880.
+- Each browser needs a **different origin or a cleared localStorage** to hold a separate
+  identity: the entry gate persists to `localStorage['hiveos.identity']`, so two tabs of the
+  same origin share one name. Separate browsers or profiles are the simplest fix.

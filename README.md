@@ -6,7 +6,9 @@ Teams sharing AI agents have no visibility into usage, no fairness mechanism for
 
 Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 
-**Live URL:** _not yet deployed — see `PROGRESS.md`_
+**Live URL:** **https://main.dbavt8jr66qxx.amplifyapp.com** — opens cold, no setup, no sign-in.
+
+![The HiveOS operator console](docs/hud.png)
 
 ---
 
@@ -18,6 +20,13 @@ Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 - A freed slot **auto-dispatches** the next queued task
 - Agents share **team memory** — a fact saved by one member is known to the next member's agent
 - The budget is an **enforced ceiling**, not a gauge — the server refuses to spend past it
+
+**Status:** the scheduler, queue, auto-dispatch, WebSocket sync and deployed HUD are live and
+verified. The agent behind the slots is still a **stub** that returns canned text and spends
+zero tokens — Amazon Bedrock is blocked by an account-level quota restriction on this AWS
+account, not by the code. `_run_agent` in `backend/agent_runner/app.py` is the single seam it
+drops into. See `PROGRESS.md` for the evidence and `ARCHITECTURE.md` decision 7 for the
+fallback.
 
 ---
 
@@ -74,8 +83,21 @@ Bedrock model access must be requested in the console before the agent works —
 sam build --use-container
 sam deploy
 
-# Frontend
+# Frontend — resolves the WebSocket URL from the stack, builds, zips, publishes
 ./scripts/deploy-frontend.sh
+```
+
+`deploy-frontend.sh` is idempotent: it reuses the existing Amplify app and branch rather than
+creating duplicates, and it fails loudly if the WebSocket URL did not make it into the bundle.
+
+For local development against the deployed backend:
+
+```bash
+cd frontend
+npm install
+VITE_WS_URL="$(aws cloudformation describe-stacks --stack-name hiveos \
+  --query "Stacks[0].Outputs[?OutputKey=='WebSocketURL'].OutputValue" --output text)" \
+  npm run dev
 ```
 
 Stack outputs (WebSocket URL, table name, queue URL):
@@ -103,8 +125,11 @@ backend/
   router/          Connection lifecycle, slot claiming, queueing, broadcast
   agent_runner/    SQS consumer, agent execution, token accounting, dispatch
   shared/          Slot scheduler, broadcast helper, memory tools, DynamoDB access
-frontend/          React + Vite — HUD, workspace, agent chat
-scripts/           Seeding, demo reset, WebSocket smoke test, frontend deploy
+frontend/
+  src/useHive.js   WebSocket client — owns all board state, reconnect, re-sync
+  src/components.jsx  Quota strip, slot cards, run queue, activity log
+  src/App.jsx      Entry gate, request form, board layout
+scripts/           Seeding, WebSocket smoke test, frontend deploy
 template.yaml      SAM — all AWS infrastructure
 ```
 
@@ -120,6 +145,9 @@ template.yaml      SAM — all AWS infrastructure
 
 ## Built with
 
-AWS Lambda · API Gateway WebSocket · DynamoDB · SQS · Amazon Bedrock · Strands Agents SDK · AWS SAM · Amplify Hosting · React + Vite
+AWS Lambda · API Gateway WebSocket · DynamoDB · SQS · AWS SAM · Amplify Hosting · React + Vite
+
+Amazon Bedrock is wired into the architecture and the IAM surface but is not yet invoked — see
+**Status** above.
 
 Developed with Claude Code as the implementation assistant.

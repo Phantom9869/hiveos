@@ -65,7 +65,7 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 ### Entity rules
 
 - **METADATA** — one per team. `tokens_used` is only ever updated with `ADD`, never read-then-write.
-- **CONN#** — one per live WebSocket connection. Deleted on `$disconnect` **and** on any `GoneException` during broadcast.
+- **CONN#** — one per live WebSocket connection. Deleted on `$disconnect` **and** on any `GoneException` during broadcast. **One row per connection, not per user** — the same `user_id` with two tabs open has two rows, so `state_snapshot.members[]` can contain duplicates. `user_left`, by contrast, carries only a `user_id`, so a client that trusts it blindly removes someone who still has a live socket. The frontend dedupes `members[]` by `user_id` and re-syncs on both membership events.
 - **AGENT#** — one per slot. `IDLE → BUSY` on claim, `BUSY → IDLE` on completion. `current_user` is `null` when `IDLE`.
 - **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched. The timestamp is **microsecond** precision (`%Y-%m-%dT%H:%M:%S.%fZ`), not the second-precision `now_iso()` used everywhere else: at second granularity two people clicking within the same second tie and fall back to UUID order, i.e. random. `connection_id` is carried so the runner can reply directly to the requester once the task finally starts.
 - **MEMORY#** — key/value facts saved by agents. No expiry in the MVP.
@@ -148,6 +148,28 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 | `error` | `{message}` | Any handled failure worth surfacing |
 
 `queue[]` entries are `{user_id, agent_type, queue_position}`, oldest first, `queue_position` 1-based.
+
+**`queue[]` deliberately carries no `estimated_wait_seconds`, unlike `queue_update`.** The
+client derives it as `queue_position * ESTIMATED_TASK_SECONDS`, which is byte-for-byte what
+`scheduler.broadcast_queue` computes. This matters because the frontend re-reads the snapshot
+after every board-moving event (see below), so a field present only on the incremental event
+gets overwritten — the ETA used to blank out ~500 ms after appearing for exactly this reason.
+`ESTIMATED_TASK_SECONDS` therefore exists **twice**: `backend/shared/scheduler.py` and
+`frontend/src/useHive.js`. Retune both in the same commit or the queue will lie.
+
+### Snapshot re-sync (client behaviour)
+
+`queue_update` is broadcast once per *waiting* user and there is **no removal frame** — nothing
+tells a client that someone has been dispatched or has left the queue. The client therefore
+applies increments for instant feel and re-sends `hello` on a 500 ms debounce after any
+`agent_state_update`, `queue_update`, `agent_response`, `user_joined` or `user_left`, letting
+the authoritative snapshot correct any drift.
+
+Two consequences anyone touching the protocol must know:
+
+1. **The snapshot must stay a superset of what the incremental events convey**, or the re-sync
+   destroys information (see the ETA above).
+2. **`state_snapshot` must never be in the re-sync trigger set** — it would feed itself.
 
 **`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event. `queue[]` exists for exactly this reason: a user who reconnects while waiting would otherwise have no way to learn their own position until somebody else's action happened to move the queue.
 

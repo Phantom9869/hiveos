@@ -15,10 +15,10 @@ Operational AWS guide. Every step is tagged **`AUTOMATED`** (Claude Code runs it
 | Requirement | State on this machine |
 |---|---|
 | AWS CLI | ✅ 2.36.47 |
-| AWS credentials | ❌ **Not configured** — Manual Action 1 |
-| Bedrock model access | ❌ **Unverified** — Manual Action 2 |
-| Docker daemon | ❌ **Not running** — Manual Action 3 |
-| AWS SAM CLI | ❌ Not installed — `brew install aws-sam-cli` |
+| AWS credentials | ✅ IAM user `hiveos-dev` (Manual Action 1 done) |
+| Bedrock model access | ⛔ **Blocked account-wide** — not a config problem. `PROGRESS.md` |
+| Docker daemon | ✅ running (Manual Action 3 done) |
+| AWS SAM CLI | ✅ 1.166.2 |
 | Node / npm | ✅ 26.8.2 / 11.19.1 |
 | Python | ⚠️ 3.14 locally — **newer than any Lambda runtime** |
 | git + gh | ✅ authenticated as `arunishrajput` |
@@ -164,21 +164,48 @@ Outputs include the WebSocket URL, table name, and queue URL.
 
 ## `AUTOMATED` — Frontend deploy
 
-Amplify Hosting in **manual deploy mode** — no GitHub OAuth required, fully scriptable.
+Amplify Hosting in **manual deploy mode** — no GitHub OAuth, no build service role, fully
+scriptable. One command:
 
 ```bash
-cd frontend && npm run build && cd ..
-# zip dist/, then:
-aws amplify create-app --name hiveos --region us-east-1                 # once
-aws amplify create-branch --app-id <APP_ID> --branch-name main          # once
-aws amplify create-deployment --app-id <APP_ID> --branch-name main
-# upload the zip to the returned URL, then:
-aws amplify start-deployment --app-id <APP_ID> --branch-name main --job-id <JOB_ID>
+./scripts/deploy-frontend.sh
 ```
 
-Wrapped in `scripts/deploy-frontend.sh` from Phase 4.
+| | |
+|---|---|
+| Amplify app | `hiveos` — app id **`dbavt8jr66qxx`** |
+| Branch | `main` |
+| Public URL | **https://main.dbavt8jr66qxx.amplifyapp.com** |
 
-The WebSocket URL is injected at build time as a Vite env var (`VITE_WS_URL`) from the stack output.
+The script is idempotent and safe to re-run for every redeploy. It:
+
+1. reads `WebSocketURL` from the stack output — the URL is never pasted by hand;
+2. builds with `VITE_WS_URL` set;
+3. **greps the built bundle for that URL and aborts if it is absent** — a frontend that loads
+   but never connects is the likeliest failure here, and this catches it before publishing;
+4. zips `dist/` with the files at the archive root;
+5. finds-or-creates the app **by name** and the branch, so repeat runs never duplicate them;
+6. uploads, starts the deployment, and polls `get-job` until `SUCCEED` rather than trusting the
+   start call's exit code.
+
+Override with env vars if needed: `STACK_NAME`, `AWS_REGION`, `APP_NAME`, `BRANCH`.
+
+> **The Amplify app is not in `template.yaml`.** That is intentional — manual-deploy mode is
+> what removes the OAuth and service-role setup. It does mean `describe-stacks` never mentions
+> it and `sam delete` will not remove it. See Teardown.
+
+### Local development against the deployed backend
+
+```bash
+cd frontend
+npm install
+VITE_WS_URL="$(aws cloudformation describe-stacks --stack-name hiveos \
+  --query "Stacks[0].Outputs[?OutputKey=='WebSocketURL'].OutputValue" --output text)" \
+  npm run dev
+```
+
+Each browser holds one identity in `localStorage['hiveos.identity']`, so two tabs of the same
+origin share a name. Use separate browsers or profiles to act as different members.
 
 ---
 
@@ -264,7 +291,7 @@ Expected total for build and demo: a few dollars. The risk is a runaway loop, no
 
 ```bash
 sam delete --stack-name hiveos
-aws amplify delete-app --app-id <APP_ID>
+aws amplify delete-app --app-id dbavt8jr66qxx   # NOT covered by sam delete
 ```
 
 Do **not** tear down before judging completes — the public URL must stay reachable.
