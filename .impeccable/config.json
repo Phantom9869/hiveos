@@ -10,7 +10,7 @@
           "frontend/src/styles.css"
         ],
         "createdAt": "2026-09-18T08:47:18.799Z",
-        "reason": "House convention predating this session: a 2px left accent is how styles.css encodes semantic state, per its own header rule 'chroma appears only where it reports resource state'. Four pre-existing uses at 788b30c (.slot --faint/--cool, queue rows --rule/--honey, .entry --rule/--cool/--honey/--alarm, .fact --honey); .toast is the fifth and carries the same memory/quota states as the .entry rows it mirrors. Removing it from only the toast would make it inconsistent with the log entry showing the same event."
+        "reason": "User confirmed 2026-09-18, asked directly, answered 'keep the accent, it's consistent'. House convention predating this session: a 2px left accent is how styles.css encodes semantic state, per its own header rule 'chroma appears only where it reports resource state'. Four pre-existing uses at 788b30c (.slot --faint/--cool, queue rows --rule/--honey, .entry --rule/--cool/--honey/--alarm, .fact --honey); .toast is the fifth and carries the same memory/quota states as the .entry rows it mirrors. Removing it from only the toast would make it inconsistent with the log entry showing the same event."
       }
     ]
   }
