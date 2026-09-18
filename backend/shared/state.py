@@ -30,6 +30,17 @@ def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def now_iso_micros():
+    """Microsecond-precision timestamp, used only for QUEUE# sort keys.
+
+    QUEUE# items are ordered by SK, so the timestamp is what makes the queue
+    FIFO. At second granularity two people clicking in the same second tie and
+    fall back to UUID order — i.e. random. Microseconds keep the order the one
+    thing the queue must never get wrong: actual arrival.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 # --- JSON ------------------------------------------------------------------
 # DynamoDB hands back Decimal for every number and json.dumps refuses it.
 # Every frame that leaves this backend goes through dumps().
@@ -111,6 +122,31 @@ def connection_user(connection_id):
     return (response.get("Item") or {}).get("user_id")
 
 
+# --- Queue -----------------------------------------------------------------
+
+
+def queue_items():
+    """Waiting tasks in FIFO order.
+
+    The SK is QUEUE#<timestamp>#<uuid> and the timestamp leads, so sorting
+    lexicographically by SK *is* sorting by arrival time. No extra index.
+    """
+    return sorted(query_team("QUEUE#"), key=lambda item: item["SK"])
+
+
+def queue_view(items=None):
+    """The queue as clients see it: 1-based positions, oldest first."""
+    items = queue_items() if items is None else items
+    return [
+        {
+            "user_id": item.get("user_id"),
+            "agent_type": item.get("agent_type"),
+            "queue_position": position,
+        }
+        for position, item in enumerate(items, start=1)
+    ]
+
+
 # --- Snapshot --------------------------------------------------------------
 
 
@@ -120,12 +156,14 @@ def state_snapshot():
     Load-bearing per CONTRACT.md: a browser joining mid-demo must not have to
     wait for the next incremental event to show correct state.
     """
-    metadata, agents, members, memory = {}, [], [], []
+    metadata, agents, members, memory, waiting = {}, [], [], [], []
 
     for item in query_team():
         sk = item["SK"]
         if sk == "METADATA":
             metadata = item
+        elif sk.startswith("QUEUE#"):
+            waiting.append(item)
         elif sk.startswith("AGENT#"):
             agents.append(
                 {
@@ -165,4 +203,8 @@ def state_snapshot():
         "pct_used": round(float(used) / float(budget) * 100, 1) if budget else 0,
         "members": members,
         "memory": memory,
+        # Without this a client that joins or reconnects while queued cannot
+        # render its own position until someone else's action happens to move
+        # the queue. The snapshot has to stand alone (CONTRACT.md).
+        "queue": queue_view(sorted(waiting, key=lambda item: item["SK"])),
     }

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """End-to-end WebSocket smoke test against the DEPLOYED HiveOS stack.
 
-This is the Phase 1 gate, and the regression check for every phase after it.
-It talks to real AWS — nothing here is mocked. A zero exit code means the
-deployed system actually behaved, not that a command succeeded.
+This is the Phase 1 and Phase 2 gate, and the regression check for every phase
+after them. It talks to real AWS — nothing here is mocked. A zero exit code
+means the deployed system actually behaved, not that a command succeeded.
+
+Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
+slots claimed, a third claim queued with a real position, auto-dispatch when a
+slot frees, and no slot leak when a task fails.
 
     pip install websockets
     python scripts/ws_smoke.py
@@ -82,26 +86,108 @@ def put_connection_row(sk, user_id):
     )
 
 
-async def expect(ws, event, who, timeout=RECV_TIMEOUT):
-    """Drain frames until `event` arrives. Other events in between are fine."""
+def scheduler_rows():
+    """Slots and queue from ONE DynamoDB query: ({slot: (status, user)}, [users]).
+
+    Deliberately a single call. A queued task only exists for as long as the
+    task ahead of it runs, so two sequential AWS CLI round trips can easily
+    outlast the window and read an empty queue that really was there.
+    """
+    page = aws(
+        "dynamodb", "query",
+        "--table-name", "hiveos-state",
+        "--key-condition-expression", "PK = :p",
+        "--expression-attribute-values", json.dumps({":p": {"S": TEAM_PK}}),
+    )
+    slots, waiting = {}, []
+    for item in page["Items"]:
+        sk = item["SK"]["S"]
+        if sk.startswith("AGENT#"):
+            slots[sk.split("#", 1)[1]] = (
+                item["status"]["S"],
+                item.get("current_user", {}).get("S"),
+            )
+        elif sk.startswith("QUEUE#"):
+            waiting.append((sk, item.get("user_id", {}).get("S")))
+    return slots, sorted(waiting)
+
+
+def agent_rows():
+    return scheduler_rows()[0]
+
+
+def queue_rows():
+    """Waiting users in FIFO order."""
+    return [user for _, user in scheduler_rows()[1]]
+
+
+def reset_scheduler_state():
+    """Both slots IDLE, queue empty — so this harness is re-runnable."""
+    for slot in ("coder", "researcher"):
+        aws(
+            "dynamodb", "put-item",
+            "--table-name", "hiveos-state",
+            "--item",
+            json.dumps({
+                "PK": {"S": TEAM_PK},
+                "SK": {"S": f"AGENT#{slot}"},
+                "status": {"S": "IDLE"},
+                "current_user": {"NULL": True},
+                "slot_id": {"S": slot},
+            }),
+        )
+    for sk, _ in scheduler_rows()[1]:
+        aws(
+            "dynamodb", "delete-item",
+            "--table-name", "hiveos-state",
+            "--key", json.dumps({"PK": {"S": TEAM_PK}, "SK": {"S": sk}}),
+        )
+
+
+async def drain(ws):
+    """Discard frames already buffered on this socket.
+
+    Every client sees every broadcast, so by mid-run each socket holds a
+    backlog. Without draining, a later `expect` can match an old frame and
+    report a pass for something that never happened.
+    """
+    while True:
+        try:
+            await asyncio.wait_for(ws.recv(), 0.25)
+        except (asyncio.TimeoutError, TimeoutError):
+            return
+
+
+async def expect(ws, event, who, timeout=RECV_TIMEOUT, where=None):
+    """Drain frames until `event` arrives. Other events in between are fine.
+
+    `where` narrows to a specific frame — several agent_state_update events
+    fly around during a claim, and the test needs a named one.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     seen = []
     while True:
         remaining = deadline - loop.time()
-        if remaining <= 0:
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            raw = await asyncio.wait_for(ws.recv(), remaining)
+        except (asyncio.TimeoutError, TimeoutError):
+            # Report what did arrive. A bare TimeoutError here says only
+            # "something hung", which is useless against deployed AWS.
             raise AssertionError(
                 f"{who}: timed out waiting for {event!r}; saw {seen}"
-            )
-        raw = await asyncio.wait_for(ws.recv(), remaining)
+            ) from None
         frame = json.loads(raw)
-        if frame.get("event") == event:
+        if frame.get("event") == event and (where is None or where(frame)):
             return frame
-        seen.append(frame.get("event"))
+        seen.append(frame)
 
 
 async def run(url):
     print(f"\nEndpoint: {url}\n")
+    reset_scheduler_state()
 
     print("1. Connect + opening snapshot")
     alice = await websockets.connect(f"{url}?user_id=alice&avatar=%F0%9F%90%9D")
@@ -195,6 +281,147 @@ async def run(url):
     await asyncio.sleep(3)  # $disconnect is fire-and-forget
     remaining = connection_rows()
     check("no CONN# rows leak after everyone leaves", remaining == {}, str(remaining))
+
+    await run_scheduler(url)
+
+
+async def run_scheduler(url):
+    """Phase 2 gate: two slots, a real queue, and no slot leaks."""
+    print("\n7. Scheduler — claiming both slots")
+    alice = await websockets.connect(f"{url}?user_id=alice")
+    bob = await websockets.connect(f"{url}?user_id=bob")
+    carol = await websockets.connect(f"{url}?user_id=carol")
+
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "write a parser",
+    }))
+    first = await expect(alice, "agent_state_update", "alice",
+                         where=lambda f: f.get("current_user") == "alice")
+    check(
+        "first claim takes the coder slot",
+        (first.get("slot_id"), first.get("current_user")) == ("coder", "alice"),
+        str(first),
+    )
+
+    await bob.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "summarise the RFC",
+    }))
+    # Filter on the holder, not just BUSY: bob's socket also carries alice's
+    # claim, and matching that would pass this check for the wrong reason.
+    second = await expect(bob, "agent_state_update", "bob",
+                          where=lambda f: f.get("current_user") == "bob")
+    check(
+        "second claim falls back to researcher — a preference is not a reservation",
+        (second.get("slot_id"), second.get("current_user")) == ("researcher", "bob"),
+        str(second),
+    )
+
+    print("\n8. The third claim queues — the Phase 2 gate")
+    await carol.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "check the budget",
+    }))
+    queued = await expect(carol, "queue_update", "carol",
+                          where=lambda f: f.get("user_id") == "carol")
+    check(
+        "third claim returns a real queue position, not a failure",
+        queued.get("queue_position") == 1,
+        str(queued),
+    )
+    check(
+        "queue position is broadcast to the whole team, not just the queued user",
+        (await expect(alice, "queue_update", "alice",
+                      where=lambda f: f.get("user_id") == "carol")) is not None,
+    )
+
+    # One query, both assertions: this is the only moment where two slots are
+    # BUSY and a third task is genuinely waiting in DynamoDB.
+    slots, waiting = scheduler_rows()
+    check(
+        "DynamoDB confirms both slots BUSY with the right holders",
+        slots == {"coder": ("BUSY", "alice"), "researcher": ("BUSY", "bob")},
+        str(slots),
+    )
+    check(
+        "QUEUE# item written to DynamoDB for carol",
+        [user for _, user in waiting] == ["carol"],
+        str(waiting),
+    )
+
+    print("\n9. Auto-dispatch when a slot frees — the Phase 2 gate")
+    done = await expect(alice, "agent_response", "alice",
+                        where=lambda f: f.get("user_id") == "alice")
+    check("alice's stub agent responded", bool(done.get("text")), str(done)[:120])
+    check(
+        "stub agent spends no tokens — the meter stays honest until Phase 3",
+        done.get("tokens_used_this_call") == 0,
+        str(done.get("tokens_used_this_call")),
+    )
+
+    dispatched = await expect(carol, "agent_state_update", "carol",
+                              where=lambda f: f.get("current_user") == "carol")
+    check(
+        "carol is auto-dispatched into the freed slot without re-asking",
+        dispatched.get("status") == "BUSY",
+        str(dispatched),
+    )
+    drained = queue_rows()
+    check("queue is now empty in DynamoDB", drained == [], str(drained))
+
+    # Let bob and carol finish so the slots return to IDLE.
+    await expect(carol, "agent_response", "carol",
+                 where=lambda f: f.get("user_id") == "carol")
+    await asyncio.sleep(2)
+    slots = agent_rows()
+    check(
+        "every slot returns to IDLE once the work drains",
+        sorted(slots.values()) == [("IDLE", None), ("IDLE", None)],
+        str(slots),
+    )
+
+    print("\n10. A failing task must never leak a slot — the Phase 2 gate")
+    await drain(alice)
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder",
+        "prompt": "__hiveos_fail__ deliberate fault injection",
+    }))
+    await expect(alice, "agent_state_update", "alice",
+                 where=lambda f: f.get("current_user") == "alice")
+    failed = await expect(alice, "error", "alice")
+    check("the failing task reports an error to its requester", "message" in failed, str(failed))
+
+    await expect(alice, "agent_state_update", "alice",
+                 where=lambda f: f.get("slot_id") == "coder" and f.get("status") == "IDLE")
+    slots = agent_rows()
+    check(
+        "the slot is released even though the agent raised",
+        slots.get("coder") == ("IDLE", None),
+        str(slots),
+    )
+
+    print("\n11. Guard against one user monopolising both slots")
+    await drain(bob)
+    await bob.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "first task",
+    }))
+    await expect(bob, "agent_state_update", "bob",
+                 where=lambda f: f.get("current_user") == "bob")
+    await bob.send(json.dumps({
+        "action": "claim_agent", "agent_type": "researcher", "prompt": "second task",
+    }))
+    refused = await expect(bob, "error", "bob")
+    check(
+        "a second concurrent claim by the same user is refused",
+        "already" in refused.get("message", ""),
+        str(refused),
+    )
+
+    print("\n12. Cleanup")
+    for ws in (alice, bob, carol):
+        await ws.close()
+    await asyncio.sleep(8)  # let bob's in-flight task finish and release
+    reset_scheduler_state()
+    leaked = connection_rows()
+    check("no CONN# rows leak after the scheduler run", leaked == {}, str(leaked))
 
 
 def main():

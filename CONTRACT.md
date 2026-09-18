@@ -59,7 +59,7 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 | `TEAM#alpha` | `METADATA` | `name`, `token_budget` (N), `tokens_used` (N), `created_at` |
 | `TEAM#alpha` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
 | `TEAM#alpha` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
-| `TEAM#alpha` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `enqueued_at` |
+| `TEAM#alpha` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `connection_id`, `enqueued_at` |
 | `TEAM#alpha` | `MEMORY#<uuid>` | `key`, `val`, `updated_by`, `created_at` |
 
 ### Entity rules
@@ -67,7 +67,7 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 - **METADATA** — one per team. `tokens_used` is only ever updated with `ADD`, never read-then-write.
 - **CONN#** — one per live WebSocket connection. Deleted on `$disconnect` **and** on any `GoneException` during broadcast.
 - **AGENT#** — one per slot. `IDLE → BUSY` on claim, `BUSY → IDLE` on completion. `current_user` is `null` when `IDLE`.
-- **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched.
+- **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched. The timestamp is **microsecond** precision (`%Y-%m-%dT%H:%M:%S.%fZ`), not the second-precision `now_iso()` used everywhere else: at second granularity two people clicking within the same second tie and fall back to UUID order, i.e. random. `connection_id` is carried so the runner can reply directly to the requester once the task finally starts.
 - **MEMORY#** — key/value facts saved by agents. No expiry in the MVP.
 
 ### Atomic slot claim
@@ -124,6 +124,10 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 | `hello` | — | Reply `state_snapshot` to this connection only. Sent once, immediately after the socket opens |
 | `claim_agent` | `{agent_type, prompt, user_id}` | Try atomic claim → dispatch to SQS, or enqueue and return position |
 | `release_agent` | `{agent_type, user_id}` | Set slot `IDLE`, dispatch the oldest queued task |
+
+**`agent_type` on `claim_agent` is a preference, not a reservation.** It is tried first, then the remaining slots in `SLOTS` order. Nobody queues behind an idle agent.
+
+**One active task per user.** A `claim_agent` from a user who already holds a slot or sits in the queue is refused with `error`. Without it a double-clicked button lets one person hold both slots — precisely the monopoly the product claims to prevent.
 | `send_message` | `{user_id, text}` | Broadcast to team chat |
 | `move_avatar` | `{user_id, x, y}` | Update `CONN#` row, broadcast position |
 
@@ -131,7 +135,7 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 
 | `event` | Payload | Sent when |
 |---|---|---|
-| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, members[], memory[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
+| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, members[], memory[], queue[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
 | `chat_message` | `{user_id, text, ts}` | `send_message` runs. `user_id` is resolved from the sender's `CONN#` row, not trusted from the frame |
 | `agent_state_update` | `{agent_type, status, current_user, slot_id}` | Any slot state change |
 | `token_update` | `{tokens_used, token_budget, pct_used}` | After every Bedrock call |
@@ -143,7 +147,19 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 | `user_left` | `{user_id}` | `$disconnect` or `GoneException` |
 | `error` | `{message}` | Any handled failure worth surfacing |
 
-**`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event.
+`queue[]` entries are `{user_id, agent_type, queue_position}`, oldest first, `queue_position` 1-based.
+
+**`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event. `queue[]` exists for exactly this reason: a user who reconnects while waiting would otherwise have no way to learn their own position until somebody else's action happened to move the queue.
+
+### Frame ordering
+
+**A slot's `agent_state_update` BUSY is broadcast before its task is handed to SQS.** Dispatching first lets a fast-failing task post its `agent_response` / `error` ahead of the BUSY frame, so the client applies BUSY *after* the release and shows a slot that never goes idle again. Verified: with the old order the Phase 2 smoke test failed about half of all runs.
+
+The guaranteed per-task sequence a client can rely on:
+
+```
+agent_state_update BUSY  →  agent_response | error  →  agent_state_update IDLE
+```
 
 **Why `hello` exists.** API Gateway does not finish establishing a connection until the `$connect` integration returns, so `post_to_connection` against it inside that handler fails with `GoneException`. The snapshot cannot be pushed from `$connect`; the client pulls it on its first frame instead. Verified on the deployed stack in Phase 1.
 
@@ -227,3 +243,9 @@ Invariants:
 - A slot is `BUSY` only with a non-null `current_user`.
 - A slot must be released even when the agent task **fails** — otherwise it leaks and the demo deadlocks. Wrap the runner body in try/finally.
 - Dispatching the next queued task happens after the release, in the same invocation.
+- **The `QUEUE#` delete is the exactly-once gate.** Two runners finishing at the same instant both see the same head-of-queue item; the conditional delete (`attribute_exists(SK)`) decides which one owns it, and the loser moves to the next item. Without this the same task dispatches twice.
+- If a task is won but every slot is then taken before it can be claimed, it is **re-written under its original SK** so the user keeps their place rather than being sent to the back of the line.
+
+### Fault injection
+
+A prompt containing `__hiveos_fail__` makes the Agent Runner raise. This is a deliberate hook so the no-slot-leak invariant stays verifiable against deployed AWS (`scripts/ws_smoke.py` section 10) rather than only in a local test. Worst case a user types the sentinel and gets an `error` frame.

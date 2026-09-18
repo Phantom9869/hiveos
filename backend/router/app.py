@@ -9,8 +9,8 @@ The API's RouteSelectionExpression is `$request.body.action` but only
 `$default` is declared, so all actions fall through to one handler. That keeps
 the route table static — Phase 2 adds actions, not CloudFormation resources.
 
-Phase 1 handles `hello` and `send_message`.
-`claim_agent` / `release_agent` arrive in Phase 2, `move_avatar` in Phase 5.
+Phase 1 handles `hello` and `send_message`; Phase 2 adds `claim_agent` and
+`release_agent`. `move_avatar` arrives in Phase 5.
 
 Why `hello` exists: API Gateway does not finish establishing a connection
 until the $connect integration returns, so post_to_connection against it fails
@@ -21,12 +21,13 @@ on the first frame after the socket opens.
 import json
 import traceback
 
-from shared import broadcast, state
+from shared import broadcast, scheduler, state
 
 OK = {"statusCode": 200}
 
 MAX_USER_ID = 40
 MAX_TEXT = 500
+MAX_PROMPT = 2000
 
 
 def lambda_handler(event, context):
@@ -92,6 +93,12 @@ def _on_message(event, connection_id):
         broadcast.send_to_connection(connection_id, state.state_snapshot())
         return OK
 
+    if action == "claim_agent":
+        return _claim_agent(connection_id, body)
+
+    if action == "release_agent":
+        return _release_agent(connection_id, body)
+
     if action == "send_message":
         text = (body.get("text") or "").strip()[:MAX_TEXT]
         if not text:
@@ -107,6 +114,72 @@ def _on_message(event, connection_id):
         return OK
 
     return _error(connection_id, f"unknown action: {action!r}")
+
+
+# --- Scheduling ------------------------------------------------------------
+
+
+def _claim_agent(connection_id, body):
+    """Take a slot if one is free, otherwise take a place in line."""
+    user_id = _user_for(connection_id, body)
+    prompt = (body.get("prompt") or "").strip()[:MAX_PROMPT]
+    if not prompt:
+        return _error(connection_id, "claim_agent requires a prompt")
+
+    # agent_type is a preference, not a reservation: claim_any falls back to
+    # the other slot rather than queueing someone behind an idle agent.
+    agent_type = body.get("agent_type")
+    if agent_type not in scheduler.SLOTS:
+        agent_type = None
+
+    if _already_working(user_id):
+        return _error(connection_id, "you already have an agent running or queued")
+
+    slot_id = scheduler.claim_any(agent_type, user_id)
+
+    if slot_id is None:
+        scheduler.enqueue(user_id, agent_type, prompt, connection_id)
+        scheduler.broadcast_queue()
+        return OK
+
+    # Announce BUSY *before* handing the task to SQS. The slot is already BUSY
+    # in DynamoDB, so this frame is accurate either way — but dispatching first
+    # lets a fast-failing task post its reply ahead of this frame, and a client
+    # that sees BUSY arrive after the release is left showing a slot that never
+    # goes idle again.
+    scheduler.broadcast_slot(slot_id, "BUSY", user_id)
+    scheduler.dispatch(slot_id, user_id, agent_type or slot_id, prompt, connection_id)
+    return OK
+
+
+def _release_agent(connection_id, body):
+    """Manual release. The Agent Runner also releases automatically when a
+    task ends — this exists so a wedged demo slot can be freed from the UI."""
+    agent_type = body.get("agent_type")
+    if agent_type not in scheduler.SLOTS:
+        return _error(connection_id, f"unknown agent_type: {agent_type!r}")
+
+    scheduler.release_and_dispatch(agent_type)
+    return OK
+
+
+def _already_working(user_id):
+    """One task per user at a time.
+
+    Without this a double-clicked "Get Agent" button lets one person hold both
+    slots, which is precisely the unfair-monopoly behaviour the product claims
+    to prevent — and it would happen live on the recording.
+
+    One query rather than a get per slot plus a queue query: this runs on the
+    claim path, which is the interaction the whole demo hangs on.
+    """
+    for item in state.query_team():
+        sk = item["SK"]
+        if sk.startswith("AGENT#") and item.get("current_user") == user_id:
+            return True
+        if sk.startswith("QUEUE#") and item.get("user_id") == user_id:
+            return True
+    return False
 
 
 # --- Helpers ---------------------------------------------------------------

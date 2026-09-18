@@ -11,7 +11,7 @@ Description: >
 # Resources are added incrementally:
 #   Phase 0  -> DynamoDB table                              DEPLOYED
 #   Phase 1  -> WebSocket API, Router Lambda                DEPLOYED
-#   Phase 2  -> SQS queue + DLQ, Agent Runner Lambda
+#   Phase 2  -> SQS queue + DLQ, Agent Runner Lambda            DEPLOYED
 #   Phase 3  -> Bedrock IAM permissions on the Agent Runner
 # Sections below are marked with the phase that fills them in.
 # ---------------------------------------------------------------------------
@@ -93,9 +93,12 @@ Resources:
       Environment:
         Variables:
           WS_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+          QUEUE_URL: !Ref TaskQueue
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref StateTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TaskQueue.QueueName
         # Without this every post_to_connection fails 403 AccessDeniedException.
         - Statement:
             - Effect: Allow
@@ -172,6 +175,60 @@ Resources:
   # Agent Runner timeout must exceed the slowest expected Bedrock call.
   # -------------------------------------------------------------------------
 
+  TaskQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: hiveos-agent-tasks
+      # Must be >= the Agent Runner timeout or SQS redelivers a task that is
+      # still running. AWS recommends 6x the function timeout (60s).
+      VisibilityTimeout: 360
+      MessageRetentionPeriod: 3600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TaskDLQ.Arn
+        # Generous: a transient DynamoDB or API Gateway blip must not
+        # dead-letter a task mid-demo.
+        maxReceiveCount: 5
+
+  TaskDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: hiveos-agent-tasks-dlq
+      MessageRetentionPeriod: 1209600   # 14 days — the post-mortem record
+
+  AgentRunnerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: hiveos-agent-runner
+      CodeUri: backend/            # same package as the Router so `shared` imports work
+      Handler: agent_runner.app.lambda_handler
+      # Phase 2 runs a stub agent in ~5s. Sized now for the Phase 3 Bedrock
+      # call so the queue's VisibilityTimeout does not have to change later.
+      Timeout: 60
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+          # The runner dispatches the next queued task itself, so it both
+          # consumes from and produces to the same queue.
+          QUEUE_URL: !Ref TaskQueue
+          TOKEN_BUDGET: !Ref TokenBudget
+          MAX_TOKENS_PER_CALL: !Ref MaxTokensPerCall
+      Events:
+        Tasks:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TaskQueue.Arn
+            # One message per invocation: one task holds exactly one slot.
+            BatchSize: 1
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TaskQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
   # -------------------------------------------------------------------------
   # PHASE 3 — Bedrock permissions
   #
@@ -205,5 +262,16 @@ Outputs:
     Description: Router Lambda, for sam logs
     Value: !Ref RouterFunction
 
-  # Added in Phase 2:
-  #   QueueUrl      — SQS queue URL for the Router to dispatch into
+  QueueUrl:
+    Description: SQS queue every agent task is dispatched through
+    Value: !Ref TaskQueue
+    Export:
+      Name: !Sub '${AWS::StackName}-QueueUrl'
+
+  DeadLetterQueueUrl:
+    Description: Dead-letter queue — inspect this when a task vanishes
+    Value: !Ref TaskDLQ
+
+  AgentRunnerFunctionName:
+    Description: Agent Runner Lambda, for sam logs
+    Value: !Ref AgentRunnerFunction

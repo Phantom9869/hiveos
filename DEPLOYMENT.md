@@ -205,7 +205,7 @@ aws sqs get-queue-attributes --queue-url <QUEUE_URL> \
   --attribute-names ApproximateNumberOfMessages
 ```
 
-`scripts/ws_smoke.py` resolves the endpoint from the stack output itself, so there is no URL to keep in sync. Run it after every backend deploy — it is the Phase 1 gate and the regression check for every phase after.
+`scripts/ws_smoke.py` resolves the endpoint from the stack output itself, so there is no URL to keep in sync. Run it after every backend deploy — it is the Phase 1 and Phase 2 gate, and the regression check for every phase after.
 
 For poking by hand instead:
 

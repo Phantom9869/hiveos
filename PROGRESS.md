@@ -14,9 +14,9 @@
 | **Project** | HiveOS — OS-style scheduler for a team's shared AI agent budget |
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
-| **Current phase** | **Phase 2 — Scheduler + queue (no LLM)** |
-| **Phase status** | `NOT STARTED` |
-| **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router Lambda. |
+| **Current phase** | **Phase 3 — Bedrock + agent + memory** |
+| **Phase status** | `NOT STARTED` — see the Bedrock blocker before starting |
+| **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. |
 | **WebSocket endpoint** | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
 | **Repository** | https://github.com/arunishrajput/hiveos (public, `main`) |
 | **AWS account** | `890608337320` · `us-east-1` · IAM user `hiveos-dev` (AdministratorAccess) |
@@ -29,8 +29,8 @@
 |---|---|---|
 | 0 | Pre-project setup | `COMPLETE` (Bedrock deferred — see below) |
 | 1 | WebSocket backbone | `COMPLETE` |
-| 2 | Scheduler + queue (no LLM) | `NOT STARTED` ← **next** |
-| 3 | Bedrock + agent + memory | `AT RISK` — blocked on account tier |
+| 2 | Scheduler + queue (no LLM) | `COMPLETE` |
+| 3 | Bedrock + agent + memory | `AT RISK` — blocked on account tier ← **next** |
 | 4 | Frontend HUD + public URL | `NOT STARTED` |
 | 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` |
 | 6 | Demo readiness | `NOT STARTED` |
@@ -38,6 +38,41 @@
 ---
 
 ## Completed
+
+**Phase 2 — 2026-09-18**
+
+- SQS `hiveos-agent-tasks` + `hiveos-agent-tasks-dlq` (maxReceiveCount 5, visibility 360s)
+- Agent Runner Lambda `hiveos-agent-runner`, SQS event source, `BatchSize: 1`
+- `backend/shared/scheduler.py` — one slot state machine used by both Lambdas
+- `claim_agent`: atomic conditional claim, falls back across slots, else writes `QUEUE#`
+- `release_agent` + automatic release in the runner's `finally`
+- Auto-dispatch of the oldest queued task on every release
+- Stub agent — 5s, canned text, **zero tokens**; `__hiveos_fail__` injects a failure
+- `scripts/ws_smoke.py` extended to 29 checks (sections 7–12 are the Phase 2 gate)
+
+**Verified against deployed AWS, not exit codes** — `python scripts/ws_smoke.py`, 29/29,
+run 3 consecutive times clean:
+
+| Check | Result |
+|---|---|
+| First claim takes `coder`; second falls back to `researcher` | ✅ |
+| DynamoDB confirms both slots BUSY with the right holders | ✅ |
+| **Third claim writes a `QUEUE#` row and broadcasts position 1** | ✅ Phase 2 gate |
+| Queue position is broadcast team-wide, not just to the queued user | ✅ |
+| **Queued task auto-dispatches into the freed slot** | ✅ Phase 2 gate |
+| Queue empties in DynamoDB; every slot returns to IDLE | ✅ |
+| **A raising task still releases its slot — no leak** | ✅ Phase 2 gate |
+| Failing task reports `error` to its requester | ✅ |
+| A user's second concurrent claim is refused | ✅ |
+| DLQ empty, main queue empty, no `CONN#`/`QUEUE#` rows leaked | ✅ |
+
+**Real bug found and fixed — frame ordering.** `claim_agent` dispatched to SQS *before*
+broadcasting `agent_state_update` BUSY, so a fast-failing task posted its reply ahead of
+the BUSY frame. A client would then apply BUSY *after* the IDLE release and show a slot
+stuck BUSY for the rest of the demo. Failed ~50% of runs; found from the delivered=True
+log proving the backend sent it, which ruled out delivery and left ordering. Both
+`_claim_agent` and `release_and_dispatch` now broadcast before dispatching.
+`CONTRACT.md` records the guaranteed sequence.
 
 **Phase 1 — 2026-09-18**
 
@@ -273,6 +308,28 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Known issues and discoveries
 
+- **Broadcast the state change before dispatching to SQS.** See the Phase 2 bug above. The
+  general rule: a frame describing committed state must go out before the work that could
+  produce the *next* frame. `CONTRACT.md` → *Frame ordering*.
+- **`state_snapshot` had no `queue` field**, so a client reconnecting while queued could
+  not render its own position. Added `queue[]`; `CONTRACT.md` updated in the same commit.
+- **`QUEUE#` sort keys needed microsecond precision.** `now_iso()` is second-granularity,
+  so two claims in the same second ordered by UUID — i.e. randomly. `state.now_iso_micros()`
+  is used for queue SKs only.
+- **The smoke test races the product.** A queued task only exists while the task ahead of
+  it runs. Two sequential AWS CLI round trips (~0.7s each) outlasted that window and read
+  an empty queue that really had been there. Both assertions now come from one
+  `scheduler_rows()` query.
+- **`expect()` swallowed the frame it was looking for.** It discards non-matching frames,
+  so a check written as "wait for BUSY, then wait for error" silently eats the error if it
+  arrives first — and then fails 20s later with no clue. Every `where=` now filters on the
+  identifying field (`current_user`), not just `status`, and a timeout prints the frames it
+  actually saw. This is what surfaced the ordering bug.
+- **Lambda-to-client sends are invisible on success.** `send_to_connection` only logged
+  `GoneException`, so "did the backend send it?" was unanswerable from CloudWatch. The
+  runner now logs `delivered=` on its error replies — that single line is what turned the
+  ordering bug from a guess into a diagnosis.
+
 - **`state_snapshot` cannot be pushed from `$connect`.** API Gateway does not finish
   establishing the connection until the `$connect` integration returns, so
   `post_to_connection` against it fails with `GoneException`. `BUILD_PLAN.md` Phase 1
@@ -314,23 +371,31 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 | GitHub repo | ✅ https://github.com/arunishrajput/hiveos |
 | WebSocket API `hiveos-ws` | ✅ `mel2gpat9c`, stage `prod` |
 | Router Lambda `hiveos-router` | ✅ verified end to end |
-| SQS queue + DLQ | ❌ Phase 2 |
-| Agent Runner Lambda | ❌ Phase 2 |
+| SQS `hiveos-agent-tasks` + DLQ | ✅ both empty, nothing dead-lettered |
+| Agent Runner `hiveos-agent-runner` | ✅ verified end to end (stub agent) |
 | Amplify app / public URL | ❌ Phase 4 |
 
 ---
 
 ## Next recommended action
 
-**Start Phase 2 — Scheduler and queue (no LLM).** The highest-value phase: the queue
-mechanic *is* the product. Add the SQS queue + DLQ and the Agent Runner Lambda, implement
-`claim_agent` with the atomic conditional update from `CONTRACT.md`, enqueue a `QUEUE#`
-item when both slots are taken, and release in `try/finally` so a failing task never
-leaks a slot.
+**Start Phase 3 — Bedrock, agent, and memory**, but read the Bedrock blocker above first.
 
-The broadcast layer it needs is already deployed and verified — `broadcast_to_team()` and
-`state_snapshot()` in `backend/shared/` are ready to use. Extend `scripts/ws_smoke.py`
-with the Phase 2 gate checks (third claim queues, auto-dispatch on release, no slot leak
-on failure).
+Open with one `bedrock-runtime converse` call to see whether the account ever unlocked. Do
+not spend more than that on re-testing — the evidence says it is an account-level
+restriction needing AWS Support, which will not turn around before 2026-09-20.
 
-Nothing in Phase 2 depends on Bedrock.
+**If Bedrock is still blocked, skip to Phase 4 and come back.** Phase 4 is the real gate:
+it produces the deployed public URL, which is the submission. The stub agent already
+returns a response over the full queue/slot path, so the HUD can be built and demoed
+against it without a single Bedrock call. Shipping Phase 4 on the stub and adding Bedrock
+later is strictly safer than blocking on an AWS Support ticket.
+
+Phase 3 work that needs no Bedrock and can be done either way:
+- `backend/shared/memory.py` and the `MEMORY#` rows
+- `get_team_memory` / `set_team_memory` and the `memory_updated` broadcast
+- The budget ceiling check and `budget_exhausted` — testable by setting `tokens_used` to
+  the ceiling by hand
+
+`_run_agent` in `backend/agent_runner/app.py` is the single seam Bedrock drops into.
+Nothing else in the runner changes.

@@ -102,7 +102,7 @@ Full procedure, verification steps, and troubleshooting: `DEPLOYMENT.md`.
 backend/
   router/          Connection lifecycle, slot claiming, queueing, broadcast
   agent_runner/    SQS consumer, agent execution, token accounting, dispatch
-  shared/          Broadcast helper, memory tools, DynamoDB access
+  shared/          Slot scheduler, broadcast helper, memory tools, DynamoDB access
 frontend/          React + Vite — HUD, workspace, agent chat
 scripts/           Seeding, demo reset, WebSocket smoke test, frontend deploy
 template.yaml      SAM — all AWS infrastructure
