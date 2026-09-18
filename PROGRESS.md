@@ -38,6 +38,7 @@
 | 3 | Model + agent + memory | `COMPLETE` — real model, real provider-reported token counts, enforced ceiling |
 | 4 | Frontend HUD + public URL | `COMPLETE` |
 | 5 | Agent chat + 2D canvas (cuttable) | `COMPLETE` — **un-cut** by user decision, 2026-09-18 |
+| 7 | Canvas-first pixel workspace | `COMPLETE` — merged, deployed, rehearsed 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
@@ -62,6 +63,69 @@ the only place the agent differs in *kind* from the Phase 3 design.
 ---
 
 ## Completed
+
+**Phase 7 — 2026-09-18 — canvas-first pixel workspace (merged and deployed)**
+
+User decision: the interface was "too basic" next to the reference aesthetic. The honest
+diagnosis was that the *layout* was the problem, not the art — a 100 px strip inside a 760 px
+vertical panel stack reads as a dashboard with a decoration in it whatever is drawn inside it.
+So the hierarchy was inverted rather than the floor restyled. Four slices, each leaving a
+working app, with the risky restructure last:
+
+- **Canvas-first shell.** The room is the primary surface; the quota became a 70 px chrome bar
+  (was a 148 px panel) and a pinned member status bar went along the bottom.
+- **The room.** Back wall with a baseboard, a window and the light it throws, contact shadows,
+  rug, whiteboard, cooler, plants; warm laminate desks with a mug, papers and a keyboard; a lit
+  monitor that spills light onto its own desk.
+- **Walking.** A two-frame gait, 700 ms travel, derived from the rest frame.
+- **Sitting.** Holding a slot walks you to that slot's desk and sits you down; releasing it
+  walks you back.
+
+**`SlotsPanel` and `QueuePanel` were dropped from the layout.** Not to save space — because the
+room now *says* what they said. A lit monitor is the slot being BUSY; a person sitting at a desk
+is its holder; a `queued #1` label under someone is their queue position. Keeping the cards
+would have been the same state rendered twice, and they cost 266 px of a viewport the floor
+needs. Both are still exported and unchanged.
+
+**The seat is a rendering override, never a write to the stored position.** That one decision is
+why releasing a slot walks you back for free, why the room never edits a coordinate the server
+owns, and why a client reconnecting mid-task still sees the holder at the desk — the slot table
+says so, and no position had to be broadcast.
+
+**Verified on the deployed public URL:**
+
+| Check | Result |
+|---|---|
+| `python scripts/rehearse.py --takes 2` | ✅ 12/12, twice, clean |
+| `python scripts/rehearse.py --ceiling` | ✅ 5/5 — 694/500, clamped, nothing spent |
+| `python scripts/ws_smoke.py` (pre-merge, clean board) | ✅ 58/58 |
+| Board fits 640×950 with nothing clipped | ✅ 862 px into an 862 px viewport |
+| Walk → sit → walk back, through a real claim | ✅ recorded from DOM state |
+
+**Four bugs found, all mine, all from the rewrite rather than from the original code:**
+
+1. **Every character stood beside its own name label.** `.sprite` was itself the single
+   box-shadow pixel, clawed back over its centre with a negative margin, which fought the flex
+   centring.
+2. **The member-bar portraits never painted.** `--sp-skin` / `--sp-shirt` were scoped to
+   `.sprite`, and the chips draw the same art from a different class, so the shadow colours were
+   undefined. Moved to `:root`.
+3. **Nobody walked, then walked at the wrong speed.** The canvas-first pass dropped the `.pawn`
+   transition while leaving the comment that said movement was a transition. The fix then did
+   nothing, because a *second* `.pawn` transition already lived in the
+   `prefers-reduced-motion: no-preference` block and won on source order — I had introduced a
+   competing pattern instead of following the file's own.
+4. **One spawn in five put somebody inside the back wall.** Rendering now maps the 0–100 range
+   onto the walkable strip below the wall, with the click handler applying the inverse from the
+   same constant.
+
+**And one found by rehearsing rather than by reading:** with four agent responses the board grew
+222 px past a 640×950 window, so the floor and the newest answer could not be on screen at the
+same time. `.board` is now capped to the viewport so the activity log's own `overflow-y: auto`
+finally engages. **This is not the `overflow: hidden` amputation recorded below** — that one
+clipped panels which had no scroll of their own and made them unreachable; here the log scrolls
+and every entry stays reachable. The floor went 270 → 250 px in the same change, which is what
+takes the log from 85 px (two lines) to 104 px (a full response).
 
 **Phase 3 closed — 2026-09-18 — real model inference on Groq, Bedrock abandoned**
 

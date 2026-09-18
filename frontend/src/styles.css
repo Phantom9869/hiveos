@@ -117,6 +117,19 @@ body {
   margin: 0 auto;
   min-height: 100vh;
   min-height: 100dvh;
+  /* Bounded, so the activity log's own `overflow-y: auto` actually engages.
+   *
+   * This is NOT the mistake recorded above. That one was `overflow: hidden` on
+   * an unbounded board, which amputated two panels that had no scroll of their
+   * own and left them unreachable. Here the board is capped and the *log*
+   * scrolls, so every entry stays reachable — and the room, the meter and the
+   * request form stay on screen while it does.
+   *
+   * Without the cap the board simply grew: four agent responses put it 222px
+   * past a 640x950 window, so the floor and the newest answer could not be
+   * seen at the same time. On a product whose claim is "every screen shows the
+   * same board", the board has to fit the screen. */
+  max-height: 100dvh;
   border-left: 1px solid var(--rule-soft);
   border-right: 1px solid var(--rule-soft);
   display: flex;
@@ -803,12 +816,14 @@ body {
  * would push the quota meter off-screen if it grew. */
 .floor {
   position: relative;
-  /* The room is the hero surface, not a strip between panels. 270px is what a
-   * 9x10 sprite at 4x plus a two-line label needs before desks and people
-   * start colliding; below ~240 the labels overlap at spawn scatter, and above
-   * ~290 the activity log — where the agent's answer appears — drops off a
-   * 640x950 demo window. */
-  height: 270px;
+  /* The room is the hero surface, not a strip between panels.
+   *
+   * 250px, measured rather than chosen: a 9x10 sprite at 4x plus a two-line
+   * label needs about 240 before desks and people start colliding, and every
+   * pixel above that comes straight out of the activity log. At 270 the log
+   * gets 85px — barely two lines, and the agent's answer is the payoff of the
+   * whole demo. At 250 it gets 104px, which is a full response. */
+  height: 250px;
   border: 1px solid var(--rule);
   border-radius: 3px;
   /* Layered top to bottom: baseboard, back wall, floor tiles.

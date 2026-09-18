@@ -25,10 +25,14 @@ the deployed URL and run it again.**
 Then:
 
 - [ ] `rehearse.py --takes 2` passed within the last hour
-- [ ] Three browser windows, **640×950 each**, side by side. The HUD is built for this; the
-      board is 933 px tall with the memory panel showing, so it fits without scrolling. (It was
-      640×880 before the workspace floor landed — a shorter window now cuts off the activity
-      log, which still scrolls but is no longer fully visible.)
+- [ ] Three browser windows, **640×950 each**, side by side. Still the right size after the
+      canvas-first rebuild — verified on the deployed URL, board 862 px into an 862 px viewport,
+      nothing clipped and no horizontal scroll.
+      **The height is the part that matters.** The board is now capped to the viewport and the
+      activity log scrolls inside itself, so a *shorter* window does not push panels off-screen
+      any more — it squeezes the log instead, and at ~806 px of viewport the agent's answer
+      starts getting cut mid-sentence. 950 px tall gives the log 104 px, which is a full
+      response.
 - [ ] Each window is a **separate browser or profile**. The entry gate persists to
       `localStorage['hiveos.identity']`, so two tabs of the same origin share one identity and
       you will end up with three "Alice"s.
@@ -112,9 +116,15 @@ This runs itself. Alice's task finishes, and three things happen in sequence —
 
 1. A **toast** fires on all three screens and Alice's fact appears in **team memory**,
    attributed to her — this lands as her task *starts*, so give it a beat before the rest
-2. Her slot frees → **Charlie is auto-dispatched into it** *(rehearsed: 64–84 ms)*, and
-   Charlie's marker on the floor picks up its working indicator
+2. Her slot frees → **Charlie is auto-dispatched into it** *(rehearsed: 64–84 ms)*. Watch the
+   floor: Charlie **walks to the freed desk and sits down**, and that desk's monitor lights up.
+   Alice **walks back** to where she was standing. Nobody told either of them to move — the
+   room is rendering the scheduler.
 3. ~6 seconds later Charlie's response arrives — **already carrying Alice's fact**
+
+> **The floor is worth narrating here.** A lit monitor *is* the slot being BUSY, and someone
+> sitting at a desk *is* the holder of that slot. There is no separate slot card any more
+> because there is nothing left for it to say.
 
 > Alice saved one fact for the team. Her slot frees, Charlie is dispatched automatically — he
 > never asked twice — and his agent already knows the deploy window. Nobody told it. That's
