@@ -38,6 +38,8 @@ is shared, the queue is shared, and the ceiling is enforced server-side for ever
 
 A deployed, public, multi-user workspace where:
 
+- **Workspaces are isolated**: type a different name and you get a different board — separate
+  budget, slots, queue, memory and ledger, created on first join with no provisioning step
 - One team shares a **token budget** and a pool of **agent slots**
 - The budget meter is **identical on every member's screen**, updating live over WebSocket
 - When every slot is busy, further requests **queue with a real position**, visible team-wide
@@ -56,7 +58,7 @@ Measured against the deployed system, not localhost:
 | A claim reaching a second browser | **282 ms** |
 | Auto-dispatch visible after a slot frees | **187 ms** |
 | An avatar move painted on a second browser | **270–294 ms** |
-| End-to-end checks against real AWS | **61/61** (`scripts/ws_smoke.py`) |
+| End-to-end checks against real AWS | **66/66** (`scripts/ws_smoke.py`) |
 | Rehearsed demo sequence | **12/12**, two consecutive unattended takes (`scripts/rehearse.py`) |
 
 Timings are click-to-paint across two separate browsers — a 20 ms DOM sampler in the *observing*

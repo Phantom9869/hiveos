@@ -9,7 +9,7 @@ Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
 slots claimed, a third claim queued with a real position, auto-dispatch when a
 slot frees, and no slot leak when a task fails. Sections 13-18 cover shared
 memory, token accounting, and the enforced budget ceiling. 19 covers avatar
-presence and movement; 20 covers fair queueing — that dispatch order follows
+presence and movement; 21 covers team isolation; 20 covers fair queueing — that dispatch order follows
 who has waited longest rather than who arrived first, and that the position
 shown on the board is the one actually dispatched.
 
@@ -737,7 +737,85 @@ async def run_memory_and_budget(url):
 
     await run_avatars(url)
     await run_fairness(url)
+    await run_isolation(url)
 
+
+
+
+async def run_isolation(url):
+    """Section 21: two teams cannot see each other.
+
+    Isolation is the one property that cannot be demonstrated from inside a
+    single team, and the one where a regression is silent — everything would
+    keep working, just for everybody at once. A leak here is a data breach
+    rather than a bug, so it is asserted from both directions: nothing of
+    acme's reaches alpha, and nothing of alpha's reaches acme.
+    """
+    print("\n21. Two teams cannot see each other — the Phase 9 gate")
+    alice = await websockets.connect(f"{url}?user_id=alice&team=alpha")
+    zara = await websockets.connect(f"{url}?user_id=zara&team=acme")
+    await asyncio.sleep(1.5)
+    for ws in (alice, zara):
+        await drain(ws)
+        await ws.send(json.dumps({"action": "hello"}))
+
+    alpha = await expect(alice, "state_snapshot", "alice")
+    acme = await expect(zara, "state_snapshot", "zara")
+
+    check(
+        "each side is told which workspace it is in",
+        (alpha.get("team"), acme.get("team")) == ("alpha", "acme"),
+        f"{alpha.get('team')} / {acme.get('team')}",
+    )
+    check(
+        "**neither team's member list contains the other's people**",
+        "zara" not in {m["user_id"] for m in alpha.get("members", [])}
+        and "alice" not in {m["user_id"] for m in acme.get("members", [])},
+        f"alpha={sorted(m['user_id'] for m in alpha.get('members', []))} "
+        f"acme={sorted(m['user_id'] for m in acme.get('members', []))}",
+    )
+    check(
+        "a brand-new team bootstrapped its own budget and slots",
+        acme.get("token_budget", 0) > 0 and len(acme.get("agents", [])) == 2,
+        f"budget={acme.get('token_budget')} slots={len(acme.get('agents', []))}",
+    )
+
+    # Real work in acme, watched from alpha.
+    await drain(alice)
+    await zara.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder",
+        "prompt": "remember: office = Berlin",
+    }))
+    await expect(zara, "agent_response", "zara",
+                 where=lambda f: f.get("user_id") == "zara", timeout=60)
+
+    leaked = []
+    try:
+        while True:
+            raw = await asyncio.wait_for(alice.recv(), 2)
+            event = json.loads(raw).get("event")
+            if event in {"agent_state_update", "token_update", "agent_response",
+                         "memory_updated", "queue_update"}:
+                leaked.append(event)
+    except (asyncio.TimeoutError, TimeoutError):
+        pass
+    check(
+        "**acme's agent activity never reaches alpha**",
+        not leaked,
+        f"leaked {sorted(set(leaked))}" if leaked else "nothing crossed",
+    )
+
+    await alice.send(json.dumps({"action": "hello"}))
+    after = await expect(alice, "state_snapshot", "alice")
+    check(
+        "**acme's spend and memory stay out of alpha's board**",
+        after.get("tokens_used") == 0 and not after.get("memory"),
+        f"alpha tokens={after.get('tokens_used')} facts={len(after.get('memory') or [])}",
+    )
+
+    for ws in (alice, zara):
+        await ws.close()
+    await asyncio.sleep(3)
 
 
 async def run_fairness(url):

@@ -40,6 +40,7 @@
 | 5 | Agent chat + 2D canvas (cuttable) | `COMPLETE` — **un-cut** by user decision, 2026-09-18 |
 | 7 | Canvas-first pixel workspace | `COMPLETE` — merged, deployed, rehearsed 2026-09-18 |
 | 8 | Depth pass — identity, full screen, ledger, fairness, tools | `COMPLETE` — 2026-09-18 |
+| 9 | Per-team isolation | `COMPLETE` — 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
@@ -64,6 +65,54 @@ the only place the agent differs in *kind* from the Phase 3 design.
 ---
 
 ## Completed
+
+**Phase 9 — 2026-09-18 — per-team isolation**
+
+A documented deferral, reversed on user decision. `PRD.md` listed "multiple
+teams" as won't-build and `ARCHITECTURE.md` had "single hardcoded team" under
+intentionally-simplified; both are updated rather than left contradicting the
+code. (`CLAUDE.md`'s never-build list bans multi-team *analytics*, which this
+is not.)
+
+Every row is partitioned by team and every backend function takes the team as
+its first argument. Two people typing different workspace names get genuinely
+separate boards, and a new team creates itself on first join — requiring a
+seeding script would have made isolation a deployment step rather than a
+property of the product.
+
+**The awkward bit was routing.** API Gateway exposes `queryStringParameters` on
+`$connect` and nothing after it, so every later frame carries a connection ID
+and no team. Resolved with a `CONN#<id>/TEAM` index row outside the team
+partitions. The obvious alternative — have the client send its team per frame —
+was rejected for the same reason `CONTRACT.md` already resolves the *sender*
+from the stored row: a value the client supplies is a value it can forge, and
+forging this one means reading another team's board.
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **66/66** (five new isolation checks) |
+| `rehearse.py --takes 2` | ✅ 12/12, twice |
+| Member lists isolated | ✅ alpha=['alice'] acme=['zara'] |
+| New team self-bootstraps | ✅ budget and 2 slots on first join |
+| Agent activity never crosses | ✅ nothing reached alpha while acme ran a task |
+| Spend and memory isolated | ✅ alpha 0 tokens / 0 facts while acme spent 775 |
+
+**Two bugs, both from mechanical edits rather than design:**
+
+1. `fair_order` read `team` without taking it — a `NameError` that only fired
+   on the enqueue path. My first static check verified every *caller* passed
+   team and never checked the *callee* accepted it; an AST pass comparing
+   parameters against names read in the body caught it.
+2. A blind string replacement inserted `team,` twice into `broadcast_queue`,
+   so the payload argument received the string `"team"`. Two overlapping
+   indentation patterns matched the same site.
+
+Both are the same lesson: a 17-call-site mechanical refactor needs a checker
+that reads the code, not a regex that reads lines.
+
+**Known simplification:** orphaned `CONN#…/TEAM` index rows are not cleaned up
+by `seed.sh`. Harmless — each is only ever read by a connection ID that will
+never recur — but they accumulate.
 
 **Phase 8 — 2026-09-18 — identity, full screen, the ledger, fairness, and tools**
 

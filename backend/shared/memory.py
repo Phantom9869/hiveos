@@ -48,9 +48,9 @@ def _slug(key):
 # --- get_team_memory -------------------------------------------------------
 
 
-def facts():
+def facts(team):
     """Every fact the team knows, most recently set last."""
-    rows = state.query_team("MEMORY#")
+    rows = state.query_team(team, "MEMORY#")
     rows.sort(key=lambda item: item.get("created_at", ""))
     return [
         {
@@ -62,13 +62,13 @@ def facts():
     ]
 
 
-def as_context():
+def as_context(team):
     """The team's facts as a block for an agent's system prompt.
 
     Returns "" when the team knows nothing, so a caller can treat emptiness
     as falsey rather than having to special-case a header with no body.
     """
-    known = facts()[-MAX_FACTS_IN_CONTEXT:]
+    known = facts(team)[-MAX_FACTS_IN_CONTEXT:]
     if not known:
         return ""
     lines = "\n".join(f"- {fact['key']}: {fact['val']}" for fact in known)
@@ -78,7 +78,7 @@ def as_context():
 # --- set_team_memory -------------------------------------------------------
 
 
-def remember(key, val, updated_by):
+def remember(team, key, val, updated_by):
     """Upsert a fact and tell the whole team. Returns the fact, or None.
 
     The broadcast is the point as much as the write: a fact appearing on
@@ -93,7 +93,7 @@ def remember(key, val, updated_by):
     fact = {"key": key, "val": val, "updated_by": updated_by}
     state.table().put_item(
         Item={
-            "PK": state.TEAM_PK,
+            "PK": state.team_pk(team),
             "SK": f"MEMORY#{_slug(key)}",
             # Write time. On an upsert this refreshes, so `facts()` orders by
             # most-recently-set — which is the useful order for display.
@@ -103,7 +103,7 @@ def remember(key, val, updated_by):
     )
     print(f"[memory] remembered {key!r} from {updated_by}")
 
-    broadcast.broadcast_to_team({"event": "memory_updated", **fact})
+    broadcast.broadcast_to_team(team, {"event": "memory_updated", **fact})
     return fact
 
 

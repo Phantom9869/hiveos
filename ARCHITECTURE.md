@@ -164,7 +164,7 @@ Hackathon teams routinely lose two to three days to tilemaps, collision, and spr
 
 ### 9. No authentication for the MVP
 
-Cognito costs roughly a day of setup. The team is hardcoded to `TEAM#alpha` and members pick a name on entry. For a judge opening a URL cold, zero-login is actively better. This is an accepted, documented tradeoff — and the reason the server-side token ceiling is mandatory. Cognito is Post-Hackathon.
+Cognito costs roughly a day of setup. Members pick a name and a workspace on entry; workspaces are isolated from each other but not authenticated, so anyone who knows a workspace name can join it. For a judge opening a URL cold, zero-login is actively better. This is an accepted, documented tradeoff — and the reason the server-side token ceiling is mandatory. Cognito is Post-Hackathon.
 
 ### 10. Infrastructure as a SAM template
 
@@ -176,7 +176,7 @@ All stack resources live in `template.yaml`. CloudFormation owns the inventory, 
 
 | Simplification | Real-world version |
 |---|---|
-| Single hardcoded team | Multi-tenant with team creation |
+| ~~Single hardcoded team~~ — **built 2026-09-18**: every row is team-partitioned and teams self-bootstrap on first join | Team *administration* — ownership, invites, renaming, deletion |
 | No authentication | Cognito user pools |
 | Fixed 2 agent slots | Configurable per-team capacity |
 | FIFO only | Priority queues, fair-share scheduling |
