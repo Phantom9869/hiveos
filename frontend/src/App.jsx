@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 
 import { useHive } from './useHive'
+import { AVATARS } from './sprites'
 import {
   ActivityPanel,
   CanvasPanel,
@@ -15,7 +16,6 @@ import {
   formatEta,
 } from './components'
 
-const AVATARS = ['🐝', '🦊', '🐙', '🦉', '🐺', '🦋', '🐢', '🦜']
 const STORAGE_KEY = 'hiveos.identity'
 
 // The Router truncates both of these server-side; matching the limits here

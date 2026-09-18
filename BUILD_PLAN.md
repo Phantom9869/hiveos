@@ -291,6 +291,50 @@ still works and still demos.
 
 ---
 
+## Phase 8 — Depth pass *(added 2026-09-18, user decision)*
+
+**Objective.** Close the gaps between what HiveOS *claims* and what it does, and stop the app
+living in a 760 px column.
+
+**Dependencies.** Phase 7 merged and deployed.
+
+### Slices — in this order
+
+Ordered so each lands on top of a verified state, and so the shell exists before anything new is
+put inside it.
+
+1. **Avatar identity (bug).** The marker chosen at the entry gate is ignored on the floor — the
+   sprite is picked by `index % 3`, so two people can look identical and *your own character
+   changes when somebody joins or leaves*. Key the sprite on the chosen avatar, stable per
+   `user_id`. Frontend only.
+2. **Full-screen responsive shell.** `.board` is capped at 760 px. Go to a real app layout on
+   wide screens — room large, side rail for activity/memory/request, quota across the top,
+   members across the bottom — collapsing to today's single column below ~1100 px.
+   **Responsive, not fixed-wide**, so three 640 px windows still work for a side-by-side demo.
+   Frontend only.
+3. **Task history + spend audit.** A `TASK#` entity: who ran what, what it cost, when. This is
+   what a governance product is actually for, and it is the reason `get_task_context` was never
+   built. Unlocks a per-user spend breakdown. Backend + `CONTRACT.md` + a panel.
+4. **Per-user fairness.** The pitch is *fair queueing* and OS-style scheduling; the mechanism is
+   one shared pool and FIFO. Nothing stops one person taking slots turn after turn and starving
+   the rest. Add a per-user allowance or round-robin so the scheduler matches the claim.
+   Backend + `CONTRACT.md`.
+5. **Real tool calling.** The model decides to call `set_team_memory` itself, instead of
+   `memory.directive()` parsing `remember: k = v`. The last place the agent differs in *kind*
+   from a real one. Backend only; the regex stays as the fallback path.
+
+### Non-negotiables
+
+- `ws_smoke.py` green before each slice is committed. Close every browser tab on the deployed
+  URL first, or the connection-leak checks fail for unrelated reasons.
+- Slices 3 and 4 change the protocol or the schema — `CONTRACT.md` is updated **in the same
+  commit**, never after.
+- `main` holds a recordable submission at all times. Anything risky goes on a branch.
+
+**Gate.** Each slice: verified against deployed AWS, `rehearse.py --takes 2` still 12/12.
+
+---
+
 ## If you are behind schedule
 
 Cut in this order:

@@ -129,3 +129,61 @@ export const SEAT_SHADOWS = DESIGNS.map((design) => shadowFor(seatedFrame(design
 
 export const SPRITE_WIDTH = DESIGNS[0][0].length * SCALE
 export const SPRITE_HEIGHT = DESIGNS[0].length * SCALE
+
+/* The markers offered at the entry gate.
+ *
+ * This list lives here, next to the art, because it is what decides how a
+ * person looks on the floor. It used to live in App.jsx as picker options
+ * only, and the floor ignored it entirely — see `lookFor`.
+ */
+export const AVATARS = ['🐝', '🦊', '🐙', '🦉', '🐺', '🦋', '🐢', '🦜']
+
+/* One hair colour per marker, so all eight are telling apart at a glance even
+ * though there are only three silhouettes.
+ *
+ * Identity, not status — which is why these may carry hue at all when the rest
+ * of the room may not. Kept desaturated so none of them can be mistaken for
+ * the jade/amber/coral of budget health or the instrument blue of a running
+ * agent.
+ */
+const HAIR = [
+  '#7a4b6b', // plum
+  '#3f5f6b', // steel
+  '#8a5a3c', // rust
+  '#5b6b45', // moss
+  '#4a5570', // slate
+  '#6e5a48', // clay
+  '#6b3f4f', // wine
+  '#52705f', // sage
+]
+
+export const HAIR_COLOURS = HAIR
+
+/** Stable small hash, for people who arrived without a marker. */
+function hashOf(text) {
+  let h = 0
+  for (let i = 0; i < (text || '').length; i += 1) {
+    h = (h * 31 + text.charCodeAt(i)) | 0
+  }
+  return Math.abs(h)
+}
+
+/* How one person looks. Derived from their *marker*, which is theirs and does
+ * not change — never from their position in the member list.
+ *
+ * The list-position version was a real bug: `index % 3` meant two people in a
+ * room of four were identical, and because the member list is deduped and
+ * re-synced, an index could shift under someone and change their character
+ * while they were standing still. A board whose whole claim is that everyone
+ * sees the same thing cannot have people swapping faces.
+ */
+export function lookFor(avatar, userId) {
+  const picked = AVATARS.indexOf(avatar)
+  const key = picked >= 0 ? picked : hashOf(userId) % AVATARS.length
+  return {
+    art: SHADOWS[key % DESIGNS.length],
+    step: STEP_SHADOWS[key % DESIGNS.length],
+    seat: SEAT_SHADOWS[key % DESIGNS.length],
+    hair: HAIR[key % HAIR.length],
+  }
+}

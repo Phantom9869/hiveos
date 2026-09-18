@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-import { SEAT_SHADOWS, SHADOWS, SPRITE_HEIGHT, SPRITE_WIDTH, STEP_SHADOWS } from './sprites'
+import { SPRITE_HEIGHT, SPRITE_WIDTH, lookFor } from './sprites'
 
 const NUM = new Intl.NumberFormat('en-US')
 
@@ -191,15 +191,16 @@ export function MemberBar({ members, me, busyUsers, queue }) {
 
   return (
     <section className="memberbar" aria-label="Who is here">
-      {members.map((member, index) => {
+      {members.map((member) => {
         const busy = busyUsers.has(member.user_id)
         const position = queuedBy.get(member.user_id)
         const state = busy ? 'busy' : position ? 'queued' : 'idle'
+        const look = lookFor(member.avatar, member.user_id)
         return (
           <div key={member.user_id} className={`member member--${state}`}>
             <span
-              className={`member__face sprite--${index % 3}`}
-              style={{ '--art': SHADOWS[index % 3] }}
+              className="member__face"
+              style={{ '--art': look.art, '--sp-hair': look.hair }}
               aria-hidden="true"
             />
             <span className="member__name">
@@ -564,6 +565,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
           const busy = busyUsers.has(id)
           const position = queuedBy.get(id)
           const isWalking = walking.has(id)
+          const look = lookFor(member.avatar, id)
           // Seated only once they have actually arrived. Tucking the legs away
           // at the moment the slot is claimed would have them glide to the
           // desk with nothing to walk on.
@@ -581,10 +583,11 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
                   member list so everyone looks distinct without the server
                   having to carry an appearance field. */}
               <span
-                className={`sprite sprite--${index % 3}`}
+                className="sprite"
                 style={{
-                  '--art': seated ? SEAT_SHADOWS[index % 3] : SHADOWS[index % 3],
-                  '--art-step': STEP_SHADOWS[index % 3],
+                  '--art': seated ? look.seat : look.art,
+                  '--art-step': look.step,
+                  '--sp-hair': look.hair,
                   width: SPRITE_WIDTH,
                   height: SPRITE_HEIGHT,
                 }}
