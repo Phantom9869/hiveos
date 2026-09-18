@@ -9,7 +9,7 @@ Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
 slots claimed, a third claim queued with a real position, auto-dispatch when a
 slot frees, and no slot leak when a task fails. Sections 13-18 cover shared
 memory, token accounting, and the enforced budget ceiling. 19 covers avatar
-presence and movement; 21 covers team isolation; 20 covers fair queueing — that dispatch order follows
+presence and movement; 21 covers team isolation; 22 covers workspace passphrases; 20 covers fair queueing — that dispatch order follows
 who has waited longest rather than who arrived first, and that the position
 shown on the board is the one actually dispatched.
 
@@ -36,6 +36,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import urllib.parse
 
 import websockets
 
@@ -738,8 +739,84 @@ async def run_memory_and_budget(url):
     await run_avatars(url)
     await run_fairness(url)
     await run_isolation(url)
+    await run_passphrase(url)
 
 
+
+
+
+# A fixed name and passphrase, so this is idempotent: the first run creates the
+# workspace, every later run verifies against what it created.
+VAULT_TEAM = "smoke-vault"
+VAULT_PASS = "correct horse battery staple"
+
+
+async def _join(url, user, team, passphrase=None):
+    """Try to open a socket and read a snapshot. Returns (snapshot | None)."""
+    query = f"user_id={user}&team={team}"
+    if passphrase is not None:
+        query += f"&passphrase={urllib.parse.quote(passphrase)}"
+    try:
+        ws = await websockets.connect(f"{url}?{query}")
+    except Exception:
+        # API Gateway answers a refused $connect with 403, which the client
+        # library raises during the handshake. There is no status code a
+        # browser could read here either — see useHive's `refused` state.
+        return None
+    try:
+        await ws.send(json.dumps({"action": "hello"}))
+        return await expect(ws, "state_snapshot", user)
+    finally:
+        await ws.close()
+
+
+async def run_passphrase(url):
+    """Section 22: a protected workspace admits only the passphrase.
+
+    The open case is asserted as hard as the closed one. Zero-login on the
+    public URL is a deliberate property — a stranger has to be able to open the
+    board cold — and an over-eager auth change would take it away silently.
+    """
+    print("\n22. Workspace passphrases — the Phase 10 gate")
+
+    created = await _join(url, "founder", VAULT_TEAM, VAULT_PASS)
+    check(
+        "a workspace created with a passphrase reports itself protected",
+        created is not None and created.get("protected") is True,
+        f"protected={created and created.get('protected')}",
+    )
+    check(
+        "**the salt and hash never reach a client**",
+        created is not None
+        and "pass_hash" not in json.dumps(created)
+        and "pass_salt" not in json.dumps(created),
+        "neither field present in state_snapshot",
+    )
+
+    await asyncio.sleep(1)
+    check(
+        "**a wrong passphrase is refused at the handshake**",
+        await _join(url, "stranger", VAULT_TEAM, "not the passphrase") is None,
+        "no socket opened",
+    )
+    check(
+        "**no passphrase at all is refused**",
+        await _join(url, "stranger", VAULT_TEAM) is None,
+        "no socket opened",
+    )
+    check(
+        "the right passphrase gets in",
+        await _join(url, "teammate", VAULT_TEAM, VAULT_PASS) is not None,
+        "joined",
+    )
+
+    open_board = await _join(url, "judge", "alpha")
+    check(
+        "**an open workspace still opens cold — zero-login survives**",
+        open_board is not None and open_board.get("protected") is False,
+        f"joined, protected={open_board and open_board.get('protected')}",
+    )
+    await asyncio.sleep(3)
 
 
 async def run_isolation(url):

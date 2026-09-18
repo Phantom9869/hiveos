@@ -98,6 +98,40 @@ room, not two that look identical and cannot see each other.
 |---|---|---|
 | `CONN#<connectionId>` | `TEAM` | `team`, `connected_at` |
 
+### Workspace passphrases
+
+A workspace is **open** unless the person who created it set a passphrase.
+Whoever creates it sets it; it is never changed afterwards by this code.
+
+| Field on METADATA | Meaning |
+|---|---|
+| `pass_salt` | 16 random bytes, hex. Absent on an open workspace |
+| `pass_hash` | PBKDF2-HMAC-SHA256, 100k iterations, hex |
+
+- **Verified on `$connect`, and refused with HTTP 403.** No socket and no
+  `CONN#` row ever exist for a failed attempt. Accepting the socket and closing
+  it after an error frame would leave a connected client with no team binding,
+  and a frame sent in that window resolves to the default workspace.
+- **Compared with `hmac.compare_digest`.** A plain `==` returns early on the
+  first differing byte, which leaks the matching prefix length to anyone
+  willing to time it.
+- **`state_snapshot` carries `protected` (a boolean) and never the salt or
+  hash.** The METADATA row is read wholesale to build the snapshot, so this is
+  the one place they could leak; the snapshot names the fields it sends.
+- **The passphrase travels in the `$connect` query string**, because a browser
+  cannot set headers on a WebSocket handshake. TLS covers it in transit. It
+  would appear in API Gateway access logs if those were enabled — they are not.
+  Recorded as a known tradeoff rather than left implicit.
+- **The default workspace stays open.** Zero-login on the public URL is a
+  deliberate property (`ARCHITECTURE.md` decision 9): a stranger has to be able
+  to open the board cold. `ws_smoke.py` asserts the open case as hard as the
+  closed one.
+
+PBKDF2 rather than argon2 or bcrypt because it is in the standard library —
+Lambda has neither without a layer, and a layer for one function costs more
+than it buys here. 100k iterations is ~50ms, paid once per handshake and never
+per frame.
+
 **The `CONN#…/TEAM` index is not redundant.** API Gateway exposes
 `queryStringParameters` on `$connect` and on nothing afterwards, so every later
 frame carries a connection ID and no team. Without this row, resolving a

@@ -378,6 +378,9 @@ export function useHive(identity) {
 
     let disposed = false
     let attempt = 0
+    // Distinguishes "refused" from "dropped": a socket that has opened at
+    // least once was authorised, so a later close is a network event.
+    let everOpened = false
     let retryTimer = null
     let socket = null
 
@@ -391,12 +394,20 @@ export function useHive(identity) {
         // Only readable by the server on $connect — every frame after this
         // carries a connection id and nothing else, so the team is recorded
         // server-side at connect time and looked up from there.
-        `&team=${encodeURIComponent(identity.team || 'alpha')}`
+        `&team=${encodeURIComponent(identity.team || 'alpha')}` +
+        // A browser cannot set headers on a WebSocket handshake, so a
+        // protected workspace's passphrase has to travel here. TLS covers it
+        // in transit; it would appear in API Gateway access logs if those were
+        // ever switched on, which they are not. Noted rather than hidden.
+        (identity.passphrase
+          ? `&passphrase=${encodeURIComponent(identity.passphrase)}`
+          : '')
       socket = new WebSocket(url)
       socketRef.current = socket
 
       socket.onopen = () => {
         attempt = 0
+        everOpened = true
         setConnection('open')
         // The snapshot cannot be pushed from $connect — API Gateway has not
         // finished establishing the connection until that integration
@@ -409,6 +420,17 @@ export function useHive(identity) {
       socket.onclose = () => {
         if (disposed) return
         socketRef.current = null
+
+        // A handshake that never opened, twice running, is a refusal rather
+        // than a blip: API Gateway answers a failed $connect with 403 and the
+        // browser surfaces it as an ordinary close, with no status a script
+        // can read. Retrying it forever would spin silently against a
+        // workspace this person simply cannot join, so say so and stop.
+        if (!everOpened && attempt >= 1) {
+          setConnection('refused')
+          return
+        }
+
         const wait = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)]
         attempt += 1
         setConnection('reconnecting')

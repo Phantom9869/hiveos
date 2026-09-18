@@ -227,6 +227,13 @@ body {
   color: var(--honey);
 }
 
+.lamp--refused .lamp__dot {
+  background: var(--alarm);
+}
+.lamp--refused {
+  color: var(--alarm);
+}
+
 .lamp--closed .lamp__dot {
   background: var(--alarm);
 }
@@ -753,6 +760,13 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.gate__optional {
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  text-transform: none;
 }
 
 .gate__hint {

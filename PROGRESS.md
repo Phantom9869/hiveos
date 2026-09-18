@@ -41,6 +41,7 @@
 | 7 | Canvas-first pixel workspace | `COMPLETE` — merged, deployed, rehearsed 2026-09-18 |
 | 8 | Depth pass — identity, full screen, ledger, fairness, tools | `COMPLETE` — 2026-09-18 |
 | 9 | Per-team isolation | `COMPLETE` — 2026-09-18 |
+| 10 | Workspace passphrases | `COMPLETE` — 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
@@ -65,6 +66,56 @@ the only place the agent differs in *kind* from the Phase 3 design.
 ---
 
 ## Completed
+
+**Phase 10 — 2026-09-18 — workspace passphrases (not Cognito)**
+
+User asked for authentication. Cognito is on `CLAUDE.md`'s **never-build** list
+— not a deferral like "multiple teams" was, but an explicit considered-and-
+rejected — so this was raised before building rather than after. The recorded
+reason still holds and is the important one: *"for a judge opening a URL cold,
+zero-login is actively better."* A login wall in front of the public URL costs
+the submission more than it protects.
+
+**Built instead, on the user's choice: a passphrase per workspace.** Whoever
+creates one may set a passphrase; joining it afterwards requires it. That
+closes the actual gap — anyone who knew a workspace *name* could walk into it —
+without touching the property that makes the demo work, because a workspace
+with no passphrase stays open.
+
+This is authentication of the **workspace**, not of the person. There are still
+no accounts and no identity behind a display name. Said plainly in
+`ARCHITECTURE.md` decision 9 rather than implied.
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **72/72** (six new passphrase checks) |
+| `rehearse.py --takes 2` | ✅ 12/12, twice |
+| Wrong passphrase | ✅ refused at the handshake, no socket |
+| No passphrase on a protected workspace | ✅ refused |
+| Right passphrase | ✅ joined |
+| Salt and hash reaching a client | ✅ never — snapshot sends `protected` only |
+| **Open workspace still opens cold** | ✅ asserted as hard as the closed case |
+
+**Decisions worth keeping:**
+
+- **Refused at `$connect` with 403**, so no socket and no `CONN#` row exist for
+  a failed attempt. Accepting and closing after an error frame would leave a
+  connected client with no team binding, and a frame sent in that window
+  resolves to the *default* workspace.
+- **`hmac.compare_digest`**, because `==` returns early on the first differing
+  byte and leaks the matching prefix length to anyone willing to time it.
+- **PBKDF2-HMAC-SHA256, 100k iterations** — in the standard library, where
+  argon2 and bcrypt would need a Lambda layer. ~50ms, paid once per handshake,
+  never per frame, so it does not touch the latency the demo is measured on.
+- **The client cannot read a 403.** A browser surfaces a refused WebSocket
+  handshake as an ordinary close with no readable status, so `useHive` infers
+  it: a socket that never opened, twice running, is a refusal rather than a
+  blip, and it stops retrying and says so instead of spinning silently.
+
+**Known tradeoff, recorded not hidden:** the passphrase travels in the
+`$connect` query string, because a browser cannot set headers on a WebSocket
+handshake. TLS covers it in transit; it would appear in API Gateway access logs
+if those were ever enabled, which they are not.
 
 **Phase 9 — 2026-09-18 — per-team isolation**
 

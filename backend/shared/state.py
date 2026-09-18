@@ -6,7 +6,9 @@ Query away — which is exactly what `state_snapshot` needs.
 """
 
 import hashlib
+import hmac
 import json
+import secrets
 import os
 import re
 from datetime import datetime, timezone
@@ -203,10 +205,58 @@ def connection_user(team, connection_id):
     return (response.get("Item") or {}).get("user_id")
 
 
+
+# --- Workspace passphrases -------------------------------------------------
+
+# PBKDF2-HMAC-SHA256. Not the strongest KDF available, but it is in the
+# standard library — Lambda has no argon2 or bcrypt without a layer, and a
+# layer for one function is more moving parts than this is worth.
+#
+# 100k iterations costs roughly 50ms per connect. That is paid once per
+# WebSocket handshake, never per frame, so it does not touch the latency the
+# demo is measured on.
+KDF_ITERATIONS = 100_000
+
+
+def _derive(passphrase, salt):
+    return hashlib.pbkdf2_hmac(
+        "sha256", (passphrase or "").encode(), bytes.fromhex(salt), KDF_ITERATIONS
+    ).hex()
+
+
+def _team_secret(team):
+    """The stored salt and hash for a team, or (None, None) if it is open."""
+    response = table().get_item(
+        Key={"PK": team_pk(team), "SK": "METADATA"},
+        ProjectionExpression="pass_salt, pass_hash",
+    )
+    item = response.get("Item") or {}
+    return item.get("pass_salt"), item.get("pass_hash")
+
+
+def passphrase_ok(team, passphrase):
+    """May this passphrase join this workspace?
+
+    An open workspace admits anyone — that is what keeps the public URL
+    something a stranger can open cold onto a live board, which is the whole
+    reason this is per-workspace rather than a login wall in front of the app.
+
+    A protected one is compared in constant time. `compare_digest` rather than
+    `==` because a plain comparison returns early on the first differing byte,
+    which leaks the length of the matching prefix to anyone willing to time it.
+    """
+    salt, stored = _team_secret(team)
+    if not stored:
+        return True
+    if not passphrase:
+        return False
+    return hmac.compare_digest(_derive(passphrase, salt), stored)
+
+
 # --- Connection ownership --------------------------------------------------
 
 
-def ensure_team(team):
+def ensure_team(team, passphrase=None):
     """Create a team's METADATA and slot rows if this is its first member.
 
     Teams bootstrap themselves. Requiring `seed.sh` before a name worked would
@@ -218,6 +268,17 @@ def ensure_team(team):
     joining a brand-new team in the same second cannot each reset it to empty.
     """
     pk = team_pk(team)
+
+    # A passphrase is set by whoever creates the workspace and never changed
+    # here. The conditional write below is what makes that safe: if two people
+    # reach a brand-new name in the same second with different passphrases,
+    # exactly one creation wins and the other is then checked against it like
+    # any other joiner.
+    secret = {}
+    if passphrase:
+        salt = secrets.token_hex(16)
+        secret = {"pass_salt": salt, "pass_hash": _derive(passphrase, salt)}
+
     try:
         table().put_item(
             Item={
@@ -227,6 +288,7 @@ def ensure_team(team):
                 "token_budget": DEFAULT_TEAM_BUDGET,
                 "tokens_used": 0,
                 "created_at": now_iso(),
+                **secret,
             },
             ConditionExpression="attribute_not_exists(PK)",
         )
@@ -500,6 +562,10 @@ def state_snapshot(team):
         # likely way anyone sees this board — is told too, not just clients
         # that happened to be watching when the spend happened.
         "usage_estimated": bool(metadata.get("usage_estimated", False)),
+        # Whether a passphrase is *needed*, never the salt or the hash. The
+        # METADATA row is read wholesale above, so this is the one place that
+        # could leak them and it names the fields it sends instead.
+        "protected": bool(metadata.get("pass_hash")),
         "members": members,
         "memory": memory,
         # Without this a client that joins or reconnects while queued cannot
