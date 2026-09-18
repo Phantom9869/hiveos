@@ -74,6 +74,25 @@ export const DESIGNS = [
  * 3 was tried first and the characters read as smudges. */
 export const SCALE = 4
 
+/* The walk frame.
+ *
+ * Only the legs move. At nine pixels wide there is no room for a readable arm
+ * swing, and from directly above you would barely see one anyway — feet
+ * together alternating with feet apart is what reads as walking, and it reads
+ * at 4x on a compressed video, which is the only test that matters here.
+ *
+ * Derived rather than written out a second time: the walk frame must differ
+ * from the rest frame in exactly one row, and three hand-copied 10-row designs
+ * would let the other nine drift apart silently.
+ */
+const LEGS_APART = '.S.....S.'
+
+function stepFrame(design) {
+  const rows = [...design]
+  rows[rows.length - 1] = LEGS_APART
+  return rows
+}
+
 /** Build the `box-shadow` value for one design. */
 export function shadowFor(design) {
   const cells = []
@@ -86,10 +105,11 @@ export function shadowFor(design) {
   return cells.join(', ')
 }
 
-/* Precomputed once at module load — this never changes at runtime, and
+/* Precomputed once at module load — these never change at runtime, and
  * rebuilding ~60 shadow entries on every render of every pawn would be work
  * done for nothing. */
 export const SHADOWS = DESIGNS.map(shadowFor)
+export const STEP_SHADOWS = DESIGNS.map((design) => shadowFor(stepFrame(design)))
 
 export const SPRITE_WIDTH = DESIGNS[0][0].length * SCALE
 export const SPRITE_HEIGHT = DESIGNS[0].length * SCALE

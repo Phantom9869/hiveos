@@ -5,7 +5,9 @@
  * on: three windows, one board, no divergence.
  */
 
-import { SHADOWS, SPRITE_HEIGHT, SPRITE_WIDTH } from './sprites'
+import { useEffect, useRef, useState } from 'react'
+
+import { SHADOWS, SPRITE_HEIGHT, SPRITE_WIDTH, STEP_SHADOWS } from './sprites'
 
 const NUM = new Intl.NumberFormat('en-US')
 
@@ -308,6 +310,68 @@ const STEP = 4
  */
 const WALK_TOP = 22
 
+/* How long a walk takes, whatever the distance. Must match the `left`/`top`
+ * transition in styles.css: the class drives the leg animation and the
+ * transition drives the travel, and if they disagree someone arrives and keeps
+ * striding, or stops stepping halfway across the room.
+ *
+ * Fixed rather than proportional to distance on purpose — a real walking speed
+ * would make a cross-room move take several seconds, and this is a board, not
+ * a game. */
+const WALK_MS = 700
+
+/* Tracks who is mid-walk, so the sprite can run its leg cycle only while
+ * actually travelling.
+ *
+ * Derived here rather than sent by the server: movement is already broadcast
+ * as a new position, and "is walking" is a property of the *rendering* of that
+ * change, not a fact about the board. Putting it in the protocol would mean a
+ * client that reconnected mid-walk had to be told about an animation.
+ */
+function useWalking(members) {
+  const [walking, setWalking] = useState(() => new Set())
+  const previous = useRef(new Map())
+  const timers = useRef(new Map())
+
+  useEffect(() => {
+    const moved = []
+    members.forEach((member) => {
+      const was = previous.current.get(member.user_id)
+      if (was && (was.x !== member.x || was.y !== member.y)) moved.push(member.user_id)
+      previous.current.set(member.user_id, { x: member.x, y: member.y })
+    })
+    if (!moved.length) return
+
+    setWalking((current) => new Set([...current, ...moved]))
+
+    // Per-user timers. A single shared timer would let one person's move cut
+    // short another's walk that started 200ms earlier.
+    const handles = timers.current
+    moved.forEach((id) => {
+      clearTimeout(handles.get(id))
+      handles.set(
+        id,
+        setTimeout(() => {
+          handles.delete(id)
+          setWalking((current) => {
+            const next = new Set(current)
+            next.delete(id)
+            return next
+          })
+        }, WALK_MS),
+      )
+    })
+  }, [members])
+
+  // Unmount only: clearing on every change would cancel walks in flight.
+  useEffect(() => {
+    const handles = timers.current
+    return () => handles.forEach(clearTimeout)
+  }, [])
+
+  return walking
+}
+
 const toFloor = (y) => WALK_TOP + (y * (100 - WALK_TOP)) / 100
 const fromFloor = (v) => ((v - WALK_TOP) * 100) / (100 - WALK_TOP)
 
@@ -358,6 +422,7 @@ const PLANTS = [
 export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], onMove }) {
   const bySlot = new Map(agents.map((agent) => [agent.slot_id, agent]))
   const queuedBy = new Map(queue.map((entry) => [entry.user_id, entry.queue_position]))
+  const walking = useWalking(members)
 
   const move = (event) => {
     const box = event.currentTarget.getBoundingClientRect()
@@ -462,7 +527,10 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
           return (
             <div
               key={member.user_id}
-              className={`pawn ${mine ? 'pawn--mine' : ''} ${busy ? 'pawn--busy' : ''}`}
+              className={
+                `pawn ${mine ? 'pawn--mine' : ''} ${busy ? 'pawn--busy' : ''} ` +
+                `${walking.has(member.user_id) ? 'pawn--walking' : ''}`
+              }
               style={{
                 left: `${Math.max(0, Math.min(100, Number(member.x) || 0))}%`,
                 top: `${toFloor(Math.max(0, Math.min(100, Number(member.y) || 0)))}%`,
@@ -475,6 +543,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
                 className={`sprite sprite--${index % 3}`}
                 style={{
                   '--art': SHADOWS[index % 3],
+                  '--art-step': STEP_SHADOWS[index % 3],
                   width: SPRITE_WIDTH,
                   height: SPRITE_HEIGHT,
                 }}

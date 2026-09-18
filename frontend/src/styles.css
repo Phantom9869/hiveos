@@ -937,7 +937,6 @@ body {
     inset 0 0 0 2px var(--desk-edge),
     0 0 12px 2px rgba(79, 168, 199, 0.55),
     0 10px 26px 8px rgba(79, 168, 199, 0.2);
-  animation: screen-flicker 1.6s steps(2, end) infinite;
 }
 
 @keyframes screen-flicker {
@@ -1176,6 +1175,8 @@ body {
   align-items: center;
   gap: 3px;
   pointer-events: none;
+  /* Movement lives in the prefers-reduced-motion: no-preference block at the
+   * bottom of this file, with the rest of the motion. */
 }
 
 /* The sprite is drawn entirely in box-shadow — see sprites.js.
@@ -1194,7 +1195,6 @@ body {
   z-index: 0;
   /* Pixel art must never be resampled. */
   image-rendering: pixelated;
-  animation: pawn-idle 2.4s steps(1, end) infinite;
 }
 
 /* Contact shadow. Without it every character hovers a few pixels above a floor
@@ -1242,22 +1242,24 @@ body {
   50.01%, 100% { transform: translateY(3px); }
 }
 
-/* Busy is the same two frames, faster — the room reads as working. */
-.pawn--busy .sprite {
-  animation: pawn-busy 0.5s steps(1, end) infinite;
-}
-
 @keyframes pawn-busy {
   0%, 50% { transform: translateY(0); }
   50.01%, 100% { transform: translateY(3px); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .sprite,
-  .pawn--busy .sprite,
-  .desk--busy .desk__monitor {
-    animation: none;
-  }
+@keyframes pawn-walk {
+  0%, 50% { transform: translateY(0); }
+  50.01%, 100% { transform: translateY(2px); }
+}
+
+@keyframes walk-cycle {
+  0%, 50% { box-shadow: var(--art); }
+  50.01%, 100% { box-shadow: var(--art-step); }
+}
+
+@keyframes walk-shadow {
+  0%, 50% { opacity: 1; width: 26px; }
+  50.01%, 100% { opacity: 0.8; width: 22px; }
 }
 
 .pawn__name {
@@ -1511,16 +1513,49 @@ body {
   }
 
   /* The whole point of the floor: you see *where someone went*, not that they
-   * blinked from one place to another. Slow enough to read across a 640px
-   * window, fast enough not to lag the click that caused it. */
+   * blinked from one place to another.
+   *
+   * 700ms, and it MUST match WALK_MS in components.jsx: that constant decides
+   * how long the `pawn--walking` class stays on, this decides how long the
+   * travel takes, and if they disagree somebody arrives and carries on
+   * striding on the spot. Was 260ms when the marker was a disc and there was
+   * no gait to keep in step with. */
   .pawn {
     transition:
-      left 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
-      top 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      left 700ms cubic-bezier(0.37, 0, 0.32, 1),
+      top 700ms cubic-bezier(0.37, 0, 0.32, 1);
   }
 
-  .pawn--busy .pawn__work {
-    animation: breathe 1.6s ease-in-out infinite;
+  .sprite {
+    animation: pawn-idle 2.4s steps(1, end) infinite;
+  }
+
+  /* Busy is the same two frames, faster — the room reads as working. */
+  .pawn--busy .sprite {
+    animation: pawn-busy 0.5s steps(1, end) infinite;
+  }
+
+  /* Walking beats both idle and busy: you can hold a slot and still cross the
+   * room, and while crossing it the legs are the thing to show. */
+  .pawn--walking .sprite {
+    animation: pawn-walk 0.26s steps(1, end) infinite;
+  }
+
+  /* The gait: two discrete frames, feet together and feet apart. `steps(1,
+   * end)` because box-shadow lists of different lengths cannot interpolate and
+   * should not try — pixel art that tweens stops being pixel art. Faster than
+   * the body bob, so the stride reads as the cause of it. */
+  .pawn--walking .sprite::before {
+    animation: walk-cycle 0.26s steps(1, end) infinite;
+  }
+
+  /* The contact shadow tightens as the body lifts. */
+  .pawn--walking .sprite::after {
+    animation: walk-shadow 0.26s steps(1, end) infinite;
+  }
+
+  .desk--busy .desk__monitor {
+    animation: screen-flicker 1.6s steps(2, end) infinite;
   }
 
   .toast {
