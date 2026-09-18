@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-import { SHADOWS, SPRITE_HEIGHT, SPRITE_WIDTH, STEP_SHADOWS } from './sprites'
+import { SEAT_SHADOWS, SHADOWS, SPRITE_HEIGHT, SPRITE_WIDTH, STEP_SHADOWS } from './sprites'
 
 const NUM = new Intl.NumberFormat('en-US')
 
@@ -323,22 +323,28 @@ const WALK_MS = 700
 /* Tracks who is mid-walk, so the sprite can run its leg cycle only while
  * actually travelling.
  *
+ * Diffs the *rendered* position rather than the stored one, because those are
+ * no longer the same thing: taking a slot seats you at a desk without changing
+ * the coordinate the server holds for you. Diffing stored coordinates would
+ * leave people sliding to their desk with no gait, and sliding back with none
+ * either.
+ *
  * Derived here rather than sent by the server: movement is already broadcast
  * as a new position, and "is walking" is a property of the *rendering* of that
  * change, not a fact about the board. Putting it in the protocol would mean a
  * client that reconnected mid-walk had to be told about an animation.
  */
-function useWalking(members) {
+function useWalking(placed) {
   const [walking, setWalking] = useState(() => new Set())
   const previous = useRef(new Map())
   const timers = useRef(new Map())
 
   useEffect(() => {
     const moved = []
-    members.forEach((member) => {
-      const was = previous.current.get(member.user_id)
-      if (was && (was.x !== member.x || was.y !== member.y)) moved.push(member.user_id)
-      previous.current.set(member.user_id, { x: member.x, y: member.y })
+    placed.forEach(({ id, left, top }) => {
+      const was = previous.current.get(id)
+      if (was && (was.left !== left || was.top !== top)) moved.push(id)
+      previous.current.set(id, { left, top })
     })
     if (!moved.length) return
 
@@ -361,7 +367,7 @@ function useWalking(members) {
         }, WALK_MS),
       )
     })
-  }, [members])
+  }, [placed])
 
   // Unmount only: clearing on every change would cancel walks in flight.
   useEffect(() => {
@@ -398,6 +404,11 @@ const DESKS = [
   { slot_id: 'researcher', x: 73, y: 34, label: 'researcher' },
 ]
 
+/* How far below a desk's own centre its chair sits, in floor percent. The desk
+ * stack is label, monitor, surface, chair from the top, all centred on the
+ * desk coordinate, so the seat is roughly a third of that stack below it. */
+const SEAT_DROP = 13
+
 /* Fixed decor. Percentages for the same reason. Positions are chosen to stay
  * clear of the desks and to put something in the lower half, which was dead
  * space that made the room read as a field rather than an office. */
@@ -422,7 +433,35 @@ const PLANTS = [
 export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], onMove }) {
   const bySlot = new Map(agents.map((agent) => [agent.slot_id, agent]))
   const queuedBy = new Map(queue.map((entry) => [entry.user_id, entry.queue_position]))
-  const walking = useWalking(members)
+
+  /* Who is sitting where. A slot holder is drawn at that slot's desk rather
+   * than at their own coordinate — and crucially the coordinate itself is left
+   * alone, so releasing the slot walks them back to wherever they were
+   * standing. Writing the seat into their position instead would strand them
+   * at the desk afterwards, and would mean the room quietly editing state the
+   * server owns. */
+  const seatOf = new Map()
+  agents.forEach((agent) => {
+    if (agent.status !== 'BUSY' || !agent.current_user) return
+    const desk = DESKS.find((d) => d.slot_id === agent.slot_id)
+    if (desk) seatOf.set(agent.current_user, desk)
+  })
+
+  const placed = members.map((member, index) => {
+    const desk = seatOf.get(member.user_id)
+    return {
+      id: member.user_id,
+      member,
+      index,
+      desk,
+      left: desk ? desk.x : Math.max(0, Math.min(100, Number(member.x) || 0)),
+      top: desk
+        ? desk.y + SEAT_DROP
+        : toFloor(Math.max(0, Math.min(100, Number(member.y) || 0))),
+    }
+  })
+
+  const walking = useWalking(placed)
 
   const move = (event) => {
     const box = event.currentTarget.getBoundingClientRect()
@@ -520,21 +559,23 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
           </div>
         ))}
 
-        {members.map((member, index) => {
-          const mine = member.user_id === me
-          const busy = busyUsers.has(member.user_id)
-          const position = queuedBy.get(member.user_id)
+        {placed.map(({ id, member, index, desk, left, top }) => {
+          const mine = id === me
+          const busy = busyUsers.has(id)
+          const position = queuedBy.get(id)
+          const isWalking = walking.has(id)
+          // Seated only once they have actually arrived. Tucking the legs away
+          // at the moment the slot is claimed would have them glide to the
+          // desk with nothing to walk on.
+          const seated = Boolean(desk) && !isWalking
           return (
             <div
-              key={member.user_id}
+              key={id}
               className={
                 `pawn ${mine ? 'pawn--mine' : ''} ${busy ? 'pawn--busy' : ''} ` +
-                `${walking.has(member.user_id) ? 'pawn--walking' : ''}`
+                `${isWalking ? 'pawn--walking' : ''} ${seated ? 'pawn--seated' : ''}`
               }
-              style={{
-                left: `${Math.max(0, Math.min(100, Number(member.x) || 0))}%`,
-                top: `${toFloor(Math.max(0, Math.min(100, Number(member.y) || 0)))}%`,
-              }}
+              style={{ left: `${left}%`, top: `${top}%` }}
             >
               {/* Three sprite designs, assigned by position in the deduped
                   member list so everyone looks distinct without the server
@@ -542,7 +583,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
               <span
                 className={`sprite sprite--${index % 3}`}
                 style={{
-                  '--art': SHADOWS[index % 3],
+                  '--art': seated ? SEAT_SHADOWS[index % 3] : SHADOWS[index % 3],
                   '--art-step': STEP_SHADOWS[index % 3],
                   width: SPRITE_WIDTH,
                   height: SPRITE_HEIGHT,
@@ -550,7 +591,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
                 aria-hidden="true"
               />
               <span className="pawn__name">
-                {mine ? 'you' : member.user_id}
+                {mine ? 'you' : id}
               </span>
               <span className="pawn__state">
                 {busy ? 'working' : position ? `queued #${position}` : 'idle'}

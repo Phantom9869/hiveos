@@ -1262,6 +1262,20 @@ body {
   50.01%, 100% { opacity: 0.8; width: 22px; }
 }
 
+/* Sitting still and working: a much smaller tick than the standing bob, since
+ * the body is not carrying itself any more — just enough that a desk with
+ * somebody at it is never completely static. */
+@keyframes pawn-seated {
+  0%, 50% { transform: translateY(0); }
+  50.01%, 100% { transform: translateY(1px); }
+}
+
+/* Most of the contact shadow belongs to legs that are now under the desk. */
+.pawn--seated .sprite::after {
+  width: 16px;
+  opacity: 0.6;
+}
+
 .pawn__name {
   max-width: 88px;
   overflow: hidden;
@@ -1552,6 +1566,13 @@ body {
   /* The contact shadow tightens as the body lifts. */
   .pawn--walking .sprite::after {
     animation: walk-shadow 0.26s steps(1, end) infinite;
+  }
+
+  /* Seated beats busy, and must stay after it: a seated person is also busy,
+   * and the sitting tick is the truer read of what they are doing. It cannot
+   * clash with walking — `seated` is only set once the walk has finished. */
+  .pawn--seated .sprite {
+    animation: pawn-seated 0.45s steps(1, end) infinite;
   }
 
   .desk--busy .desk__monitor {

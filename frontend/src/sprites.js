@@ -93,6 +93,21 @@ function stepFrame(design) {
   return rows
 }
 
+/* The seated frame: legs gone, because they are under the desk.
+ *
+ * From directly above, sitting down is almost entirely about where you are —
+ * at the chair rather than beside it. The only part that actually changes
+ * shape is the legs disappearing beneath the desk, and that one row is enough
+ * to sell it once the character is in the right place.
+ */
+const LEGS_TUCKED = '.........'
+
+function seatedFrame(design) {
+  const rows = [...design]
+  rows[rows.length - 1] = LEGS_TUCKED
+  return rows
+}
+
 /** Build the `box-shadow` value for one design. */
 export function shadowFor(design) {
   const cells = []
@@ -110,6 +125,7 @@ export function shadowFor(design) {
  * done for nothing. */
 export const SHADOWS = DESIGNS.map(shadowFor)
 export const STEP_SHADOWS = DESIGNS.map((design) => shadowFor(stepFrame(design)))
+export const SEAT_SHADOWS = DESIGNS.map((design) => shadowFor(seatedFrame(design)))
 
 export const SPRITE_WIDTH = DESIGNS[0][0].length * SCALE
 export const SPRITE_HEIGHT = DESIGNS[0].length * SCALE
