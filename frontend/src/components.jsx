@@ -297,6 +297,20 @@ export function QueuePanel({ queue, me }) {
 /** How far one arrow-key press moves you, in canvas percent. */
 const STEP = 4
 
+/* The back wall occupies the top of the floor, so the walkable ground starts
+ * below it. Coordinates stay exactly what CONTRACT.md says they are — 0-100
+ * over the whole board, unchanged server-side — and only the *rendering* maps
+ * that range onto the floor strip. Without this, one spawn in five puts
+ * somebody inside the wall.
+ *
+ * The click handler applies the inverse, so clicking a spot still puts you on
+ * that spot. Both directions use this one constant; they cannot drift apart.
+ */
+const WALK_TOP = 22
+
+const toFloor = (y) => WALK_TOP + (y * (100 - WALK_TOP)) / 100
+const fromFloor = (v) => ((v - WALK_TOP) * 100) / (100 - WALK_TOP)
+
 const ARROWS = {
   ArrowUp: [0, -STEP],
   ArrowDown: [0, STEP],
@@ -320,11 +334,13 @@ const DESKS = [
   { slot_id: 'researcher', x: 73, y: 34, label: 'researcher' },
 ]
 
-/* Fixed decor. Percentages for the same reason; the corners are chosen to stay
- * clear of both desks and of the spawn scatter. */
+/* Fixed decor. Percentages for the same reason. Positions are chosen to stay
+ * clear of the desks and to put something in the lower half, which was dead
+ * space that made the room read as a field rather than an office. */
 const PLANTS = [
-  { x: 7, y: 78 },
-  { x: 93, y: 78 },
+  { x: 6, y: 62 },
+  { x: 94, y: 62 },
+  { x: 16, y: 88 },
 ]
 
 /* The shared workspace floor.
@@ -348,7 +364,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
     if (!box.width || !box.height) return
     onMove(
       ((event.clientX - box.left) / box.width) * 100,
-      ((event.clientY - box.top) / box.height) * 100,
+      fromFloor(((event.clientY - box.top) / box.height) * 100),
     )
   }
 
@@ -381,8 +397,29 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
           'Click or use the arrow keys to move your marker.'
         }
       >
-        {/* Desks first so pawns paint over them — someone standing at a desk
-            should be in front of it, not behind it. */}
+        {/* Wall fixtures sit in the back band of the room, above everything
+            else, so the floor has an "up" and reads as enclosed rather than as
+            a field seen from above. */}
+        <div className="fixture fixture--board" aria-hidden="true">
+          <span className="board__scribble" />
+          <span className="board__scribble board__scribble--short" />
+        </div>
+
+        <div className="fixture fixture--window" aria-hidden="true" />
+        <div className="fixture fixture--daylight" aria-hidden="true" />
+
+        <div className="fixture fixture--cooler" aria-hidden="true">
+          <span className="cooler__bottle" />
+          <span className="cooler__body" />
+        </div>
+
+        {/* A rug under the lounge end of the room. Purely spatial: it breaks
+            the single uniform tile field into zones, which is most of what
+            makes a top-down room look designed rather than tiled. */}
+        <div className="fixture fixture--rug" aria-hidden="true" />
+
+        {/* Desks after the rug so they sit on it, and before the pawns so
+            someone standing at a desk is in front of it, not behind it. */}
         {DESKS.map((desk) => {
           const slot = bySlot.get(desk.slot_id)
           const busy = slot?.status === 'BUSY'
@@ -428,7 +465,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
               className={`pawn ${mine ? 'pawn--mine' : ''} ${busy ? 'pawn--busy' : ''}`}
               style={{
                 left: `${Math.max(0, Math.min(100, Number(member.x) || 0))}%`,
-                top: `${Math.max(0, Math.min(100, Number(member.y) || 0))}%`,
+                top: `${toFloor(Math.max(0, Math.min(100, Number(member.y) || 0)))}%`,
               }}
             >
               {/* Three sprite designs, assigned by position in the deduped

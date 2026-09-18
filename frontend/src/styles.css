@@ -44,8 +44,9 @@
    * monitor, which *is* a state report. */
   --floor: #19212a;
   --tile: #1d2731;
-  --desk: #2a3542;
-  --desk-edge: #141b22;
+  --desk: #4a4031;
+  --desk-edge: #221d16;
+  --desk-top: #5c5040;
   --screen-off: #10161c;
   /* The single exception: a plant is not state, but a grey plant reads as a
    * rendering bug. Desaturated hard enough that it cannot be mistaken for the
@@ -59,6 +60,17 @@
    */
   --sp-skin: #d9a879;
   --sp-shirt: #46525f;
+
+  /* Room structure. Warm neutrals, not chroma: the rule at the top of this
+   * file reserves saturated hue for state, and a wall that is merely warmer
+   * than the floor does not compete with the quota strip for attention the way
+   * a coloured one would. */
+  --wall: #232d38;
+  --wall-trim: #2f3b47;
+  --rug: #232c39;
+  --chair: #3c4653;
+  --glass: #2b4a58;
+  --shadow: rgba(0, 0, 0, 0.45);
 }
 
 * {
@@ -799,16 +811,32 @@ body {
   height: 270px;
   border: 1px solid var(--rule);
   border-radius: 3px;
-  /* Checkerboard tiles. Two graphite shades rather than a colour: the quota
-   * strip is the loud element on this board and a patterned floor competing
-   * with it would cost more than it buys. 24px squares read as tiles at the
-   * width a demo browser is recorded at without turning into noise. */
+  /* Layered top to bottom: baseboard, back wall, floor tiles.
+   *
+   * The wall band is what turns a plan view into a room. Without it the floor
+   * is a field with furniture standing in it and the eye has no "up"; with it
+   * the desks read as being against something. The baseboard is a single 3px
+   * line and does more for that impression than anything else here. */
   background-image:
+    linear-gradient(var(--wall-trim), var(--wall-trim)),
+    linear-gradient(var(--wall), var(--wall)),
     linear-gradient(45deg, var(--tile) 25%, transparent 25%, transparent 75%, var(--tile) 75%),
     linear-gradient(45deg, var(--tile) 25%, transparent 25%, transparent 75%, var(--tile) 75%);
-  background-size: 48px 48px;
-  background-position: 0 0, 24px 24px;
+  background-size:
+    100% 3px,
+    100% 52px,
+    44px 44px,
+    44px 44px;
+  background-position:
+    0 50px,
+    0 0,
+    0 0,
+    22px 22px;
+  background-repeat: no-repeat, no-repeat, repeat, repeat;
   background-color: var(--floor);
+  /* Vignette. Pulls the eye to the middle of the room and stops the tile field
+   * running flat into the panel border. */
+  box-shadow: inset 0 0 44px 10px rgba(0, 0, 0, 0.42);
   cursor: crosshair;
   overflow: hidden;
 }
@@ -836,14 +864,43 @@ body {
 
 .desk__surface {
   position: relative;
-  width: 72px;
-  height: 24px;
+  width: 76px;
+  height: 26px;
   border-radius: 2px;
-  background: var(--desk);
-  /* A top-down desk needs a front edge or it is just a rectangle. */
+  /* Warm laminate rather than flat grey. A top-down desk needs a lit top edge
+   * and a dark front edge or it is just a rectangle. */
+  background: linear-gradient(var(--desk-top), var(--desk));
   box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.09),
     inset 0 -4px 0 0 var(--desk-edge),
-    0 2px 4px rgba(0, 0, 0, 0.45);
+    0 4px 7px var(--shadow);
+}
+
+/* Mug and papers. The detail that reads as "someone works here" at this size —
+ * two shapes, no more; a cluttered 76px desk just turns to noise. */
+.desk__surface::before,
+.desk__surface::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+}
+
+.desk__surface::before {
+  left: 7px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8c6f52;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.desk__surface::after {
+  right: 7px;
+  width: 11px;
+  height: 8px;
+  border-radius: 1px;
+  background: rgba(218, 226, 234, 0.5);
+  transform: rotate(-6deg);
 }
 
 /* Keyboard, on the near edge of the desk where a keyboard actually sits. */
@@ -873,9 +930,13 @@ body {
  * which is the entire argument for putting the floor first. */
 .desk--busy .desk__monitor {
   background: var(--cool);
+  /* The wide, soft third shadow is light spilling from the screen onto the
+   * desk and the floor around it. A lit rectangle alone reads as a sticker;
+   * the spill is what makes it read as a source. */
   box-shadow:
     inset 0 0 0 2px var(--desk-edge),
-    0 0 12px 2px rgba(79, 168, 199, 0.5);
+    0 0 12px 2px rgba(79, 168, 199, 0.55),
+    0 10px 26px 8px rgba(79, 168, 199, 0.2);
   animation: screen-flicker 1.6s steps(2, end) infinite;
 }
 
@@ -884,14 +945,32 @@ body {
   100% { opacity: 0.76; }
 }
 
-/* Chair, seen from above: a seat with a back edge toward the desk. */
+/* Chair, seen from above: the backrest is the bar nearest the desk, the seat
+ * is the rounded pad below it. Previously this was one rectangle in the desk's
+ * own edge colour, which at this size read as a hole cut in the floor rather
+ * than as furniture. */
 .desk__chair {
-  width: 20px;
-  height: 16px;
-  margin-top: 3px;
-  border-radius: 3px 3px 5px 5px;
-  background: var(--desk-edge);
-  box-shadow: inset 0 3px 0 0 rgba(255, 255, 255, 0.05);
+  position: relative;
+  width: 22px;
+  height: 18px;
+  margin-top: 4px;
+  border-radius: 4px 4px 7px 7px;
+  background: var(--chair);
+  box-shadow:
+    inset 0 -2px 0 0 rgba(0, 0, 0, 0.3),
+    0 3px 6px var(--shadow);
+}
+
+.desk__chair::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  transform: translateX(-50%);
+  width: 15px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .desk__label {
@@ -908,6 +987,140 @@ body {
 
 .desk--busy .desk__label {
   color: var(--cool);
+}
+
+
+/* --- Room fixtures --------------------------------------------------------- */
+
+.fixture {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* Whiteboard, mounted on the back wall. */
+.fixture--board {
+  left: 50%;
+  top: 9%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 74px;
+  height: 30px;
+  padding: 0 7px;
+  border-radius: 2px;
+  background: #33414f;
+  box-shadow:
+    inset 0 0 0 2px #1b242d,
+    0 3px 5px var(--shadow);
+}
+
+.board__scribble {
+  height: 2px;
+  width: 100%;
+  border-radius: 1px;
+  background: rgba(218, 226, 234, 0.22);
+}
+
+.board__scribble--short {
+  width: 58%;
+}
+
+/* Water cooler, against the wall. */
+.fixture--cooler {
+  left: 88%;
+  top: 22%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.cooler__bottle {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px 3px 1px 1px;
+  background: rgba(79, 168, 199, 0.32);
+  box-shadow: inset 0 -3px 0 0 rgba(79, 168, 199, 0.22);
+}
+
+.cooler__body {
+  width: 16px;
+  height: 16px;
+  border-radius: 1px 1px 2px 2px;
+  background: #38454f;
+  box-shadow: 0 3px 5px var(--shadow);
+}
+
+/* Lounge rug. No border and a soft edge, so it reads as a soft surface laid on
+ * the tiles rather than as another panel drawn on top of them. */
+.fixture--rug {
+  left: 50%;
+  top: 72%;
+  width: 46%;
+  height: 84px;
+  border-radius: 7px;
+  background: var(--rug);
+  box-shadow:
+    inset 0 0 0 3px rgba(218, 226, 234, 0.045),
+    inset 0 0 18px 4px rgba(0, 0, 0, 0.3);
+}
+
+
+/* Window, on the back wall. The one warm thing in the room: a top-down office
+ * lit only from overhead is uniformly flat, and a single directional source
+ * gives the tiles something to fall off from. */
+.fixture--window {
+  left: 16%;
+  top: 9%;
+  width: 70px;
+  height: 28px;
+  border-radius: 2px;
+  background: linear-gradient(160deg, var(--glass), #1d3440);
+  box-shadow:
+    inset 0 0 0 3px #38454f,
+    0 3px 6px var(--shadow);
+}
+
+/* Glazing bars. Two lines are enough to read as a window; more turns to moire
+ * at this size. */
+.fixture--window::before,
+.fixture--window::after {
+  content: '';
+  position: absolute;
+  background: #38454f;
+}
+
+.fixture--window::before {
+  left: 50%;
+  top: 3px;
+  bottom: 3px;
+  width: 3px;
+  transform: translateX(-50%);
+}
+
+.fixture--window::after {
+  left: 3px;
+  right: 3px;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+}
+
+/* The light it throws onto the floor. Soft, wide and very low contrast — it is
+ * doing atmosphere, not illumination, and anything stronger would compete with
+ * a lit monitor, which is the one thing in this room that means something. */
+.fixture--daylight {
+  left: 17%;
+  top: 46%;
+  width: 190px;
+  height: 150px;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(120, 170, 190, 0.09),
+    rgba(120, 170, 190, 0) 70%
+  );
 }
 
 /* --- Decor ---------------------------------------------------------------- */
@@ -946,7 +1159,9 @@ body {
   margin-top: 7px;
   border-radius: 1px 1px 3px 3px;
   background: var(--desk);
-  box-shadow: inset 0 -3px 0 0 var(--desk-edge);
+  box-shadow:
+    inset 0 -3px 0 0 var(--desk-edge),
+    0 3px 5px var(--shadow);
 }
 
 /* --- People --------------------------------------------------------------- */
@@ -974,9 +1189,29 @@ body {
  */
 .sprite {
   position: relative;
+  /* Own stacking context, so the contact shadow below can sit behind the art
+   * without falling behind the floor itself. */
+  z-index: 0;
   /* Pixel art must never be resampled. */
   image-rendering: pixelated;
   animation: pawn-idle 2.4s steps(1, end) infinite;
+}
+
+/* Contact shadow. Without it every character hovers a few pixels above a floor
+ * it is supposed to be standing on — the single cheapest thing that makes a
+ * flat top-down scene read as having a ground plane. */
+.sprite::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -2px;
+  z-index: -1;
+  width: 26px;
+  height: 7px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--shadow);
+  filter: blur(2px);
 }
 
 .sprite::before {
@@ -987,6 +1222,12 @@ body {
   width: 4px;
   height: 4px;
   box-shadow: var(--art);
+  /* A one-pixel dark rim around the whole composed sprite. Cheap — one filter
+   * rather than another ~60 shadow entries per design — and it is what stops
+   * the characters dissolving into a patterned floor of almost the same value.
+   * Applied here rather than on `.sprite` so it does not also outline the
+   * contact shadow. */
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.85));
 }
 
 .sprite--0 { --sp-hair: #7a4b6b; }
@@ -1027,10 +1268,14 @@ body {
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.06em;
-  color: var(--dim);
-  /* The floor is patterned, so a label sitting directly on it loses its edges
-   * against the tile boundaries. */
-  text-shadow: 0 1px 2px var(--ink), 0 0 3px var(--ink);
+  color: var(--text);
+  /* The floor is patterned and people stand close together, so a label needs
+   * its own ground or it dissolves into both the tiles and the next person's
+   * name. */
+  text-shadow:
+    0 1px 2px var(--ink),
+    0 0 4px var(--ink),
+    0 0 8px var(--ink);
 }
 
 .pawn__state {
