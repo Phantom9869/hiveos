@@ -238,8 +238,9 @@ function activityFor(frame) {
         who: `${frame.agent_type ?? 'agent'} → ${frame.user_id ?? 'unknown'}`,
         text: frame.text ?? '',
         cost: frame.tokens_used_this_call,
-        // While the agent is stubbed the count is a heuristic over real text,
-        // not billed model usage. Carried through so the UI says so.
+        // Normally false — the count is the usage the provider reported. True
+        // only when the model was unreachable and the answer was composed
+        // locally. Carried through so the UI can prefix the cost with `~`.
         estimated: Boolean(frame.estimated),
         ts,
       }

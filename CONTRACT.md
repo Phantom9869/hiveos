@@ -40,13 +40,28 @@ Both functions are built from `CodeUri: backend/` with handlers like `router.app
 | `TOKEN_BUDGET` | Agent Runner | Team token ceiling |
 | `MAX_TOKENS_PER_CALL` | Agent Runner | Per-invocation output cap |
 
-### Bedrock model ID
+### Inference model
 
 ```
-UNKNOWN — VERIFY IN PHASE 0
+openai/gpt-oss-120b   via Groq   (https://api.groq.com/openai/v1/chat/completions)
 ```
 
-Resolve with `aws bedrock list-inference-profiles --region us-east-1`, confirm with a real `bedrock-runtime converse` call, then record the exact working ID here. **Never guess it** — the Converse API and inference-profile forms differ, and a wrong ID fails at runtime, not at deploy time.
+**Not Bedrock.** Bedrock is blocked account-wide on this AWS account: `us-east-1`, `us-west-2` and `ap-south-1` all refuse, Marketplace models with `INVALID_PAYMENT_INSTRUMENT` and first-party Amazon Nova with a hard zero per-day token quota that reports `adjustable=False`. Verified again on 2026-09-18 before the switch. See `PROGRESS.md`.
+
+Every other component is AWS. Only inference leaves.
+
+| | |
+|---|---|
+| Client | `backend/shared/llm.py` — one `urllib` POST, no SDK |
+| Credential | SSM SecureString `/hiveos/groq-api-key`, read at runtime, cached per container. **Never** in the template, the stack, an env var, or git |
+| Model | `GROQ_MODEL` env var, pinned in `samconfig.toml` |
+| Output cap | `MAX_TOKENS_PER_CALL` = 400 |
+
+**Never guess the model name.** Groq retires them: `llama-3.3-70b-versatile`, the name this was first written against, was already gone and failed at runtime rather than at deploy. List the current ids with `GET https://api.groq.com/openai/v1/models` before changing it.
+
+**A `Default:` change does not reach a deployed stack.** CloudFormation keeps an existing stack's parameter values on update, so the model name is pinned in `samconfig.toml`'s `parameter_overrides`, not left to the template default.
+
+If Bedrock is ever unblocked, swap the body of `llm.py:complete` and add `bedrock:InvokeModel` to the Agent Runner role. Nothing else changes.
 
 ---
 
@@ -200,17 +215,23 @@ Two consequences anyone touching the protocol must know:
 ### Token provenance — `estimated` / `usage_estimated`
 
 Every frame carrying a token count says where the number came from, because
-while the agent is stubbed it is **not** billed model usage:
+not every number is billed model usage:
 
 | Field | On | Means |
 |---|---|---|
 | `estimated` | `agent_response`, `token_update` | the total this frame reports includes estimated spend |
 | `usage_estimated` | `state_snapshot` | the same fact, for a client that loaded cold |
 
-While stubbed, `tokens_used_this_call` is `len(prompt + memory_context + response) / 4`
-— the standard rough heuristic over the **real** strings, not an invented
-number. When a real Bedrock call replaces `_run_agent`, the count comes from
-the response's usage block and both flags go false.
+**Normally both are false.** `tokens_used_this_call` is the `total_tokens` the
+provider reported for that call — actual counted usage, typically 200–400 per
+task.
+
+They go true only on the **fallback path**: if the model is unreachable, the
+Agent Runner still answers, from composed text, and charges
+`len(prompt + memory_context + response) / 4` — the standard rough heuristic
+over the real strings, not an invented number. A degraded answer is better
+than a broken workspace, but it must never be laundered into a billed-looking
+meter, which is what these two flags prevent.
 
 **The snapshot field is not optional.** A client that was not connected when
 the spend happened — which is every judge opening the public URL — has no
@@ -315,13 +336,23 @@ works"). With the prompt already on the SQS message, the tool would return
 nothing a caller does not already have. Build the entity first if this is ever
 wanted.
 
-**How a fact gets saved while the agent is stubbed.** A real model decides to
-call `set_team_memory` itself. The stub has no model, so the trigger is a
-prompt convention: `remember: <key> = <value>` (colon optional,
-case-insensitive). This is the one place the stub differs from a real agent in
-*kind* rather than degree — everything it then touches, the row, the
-broadcast, the context load on the next task, is the real mechanism. It is
-also why the demo narration has to say the agent is stubbed.
+**How a fact gets saved: a prompt convention, not a tool call.** `remember:
+<key> = <value>` (colon optional, case-insensitive), parsed by
+`memory.directive()`. A model given tools would decide to call
+`set_team_memory` itself; this decides for it.
+
+That is a deliberate remaining gap, and the only place the agent still differs
+in *kind* rather than degree from the Phase 3 design. Tool calling adds a
+second round trip and a failure surface, and was judged not worth it against a
+deadline once the rest was green. Everything the directive then touches — the
+row, the broadcast, the context load on the next task — is the real mechanism.
+
+**The save happens before the model call, not after it.** The fact is the
+user's explicit instruction, so it must persist even when the model is
+unreachable; and saving first puts it in its own call's context. One
+consequence worth knowing: `memory_updated` now broadcasts at the *start* of a
+task rather than at the end, so it can overtake frames a client might expect to
+see first. Anything asserting on frame order has to buffer rather than assume.
 
 ---
 

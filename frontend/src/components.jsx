@@ -119,10 +119,11 @@ export function QuotaPanel({ tokensUsed, tokenBudget, pctUsed, exhausted, estima
       ) : (
         <p className="quota__note">
           {NUM.format(remaining)} tokens left, shared by the whole team
-          {/* The agent is stubbed, so these counts are a heuristic over real
-              text rather than billed model usage. Say so next to the number
-              rather than relying on the narrator to remember. */}
-          {estimated ? ' · estimated, the agent is stubbed' : ''}
+          {/* Normally absent: counts are the usage the provider reported. This
+              appears only when some spend on this board was charged from the
+              fallback heuristic because the model was unreachable — said next
+              to the number rather than trusting a narrator to remember. */}
+          {estimated ? ' · partly estimated — the model was unreachable' : ''}
         </p>
       )}
     </section>

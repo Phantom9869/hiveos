@@ -33,16 +33,18 @@ Intended system design and the decisions behind it. Interfaces that must not dri
        │                        │ team memory  │◄──┤  Agent Runner    │
        │                        └──────────────┘   │  Lambda          │
        │                                           │                  │
-       └───────────────────────────────────────────┤  Strands agent   │
-                                                   │  → Bedrock       │
+       └───────────────────────────────────────────┤  load memory     │
+                                                   │  call the model  │
                                                    │  token accounting │
                                                    │  release slot     │
                                                    │  dispatch next    │
                                                    └────────┬─────────┘
-                                                            ▼
+                                                            ▼ HTTPS
                                                    ┌──────────────────┐
-                                                   │ Amazon Bedrock   │
-                                                   │ (Claude)         │
+                                                   │ Groq             │
+                                                   │ gpt-oss-120b     │
+                                                   │ (the only hop    │
+                                                   │  that is not AWS)│
                                                    └──────────────────┘
 ```
 
@@ -56,9 +58,8 @@ Intended system design and the decisions behind it. Interfaces that must not dri
 | **Router Lambda** | Connection lifecycle, message routing, atomic slot claiming, enqueue, broadcast, GoneException handling | Serverless, scales to zero, direct DynamoDB and SQS access |
 | **DynamoDB** (single table) | All state: team metadata, connection IDs, slot states, queue entries, team memory | Serverless, fast, PK/SK pattern fits every access pattern; single table means fewer IAM grants and simpler debugging |
 | **SQS** (+ DLQ) | Durable at-least-once handoff of every agent task to the runner | Makes task execution survive Lambda restarts, with retry and a dead-letter queue |
-| **Agent Runner Lambda** | Consumes SQS, runs the agent, calls Bedrock, accounts tokens, broadcasts, releases the slot, dispatches the next queued task | Isolated from the Router so agent latency never blocks connection handling |
-| **Amazon Bedrock** | Foundation model inference | Mandatory AWS integration; the model the agent actually runs on |
-| **Strands Agents SDK** | Agent loop and tool calling | AWS-native open-source agent framework, named in the hackathon materials |
+| **Agent Runner Lambda** | Consumes SQS, loads team memory, calls the model, accounts tokens, broadcasts, releases the slot, dispatches the next queued task | Isolated from the Router so model latency never blocks connection handling |
+| **Groq** (`openai/gpt-oss-120b`) | Foundation model inference — **the only component not on AWS** | Bedrock is blocked account-wide on this account (decision 7). Reached with one stdlib `urllib` POST; the key is an SSM SecureString read at runtime |
 | **Amplify Hosting** | Static React frontend, public HTTPS URL | Fastest path to an HTTPS URL a judge can open cold; deployable from the CLI |
 
 ---
@@ -84,7 +85,8 @@ Browser ──claim_agent──► Router Lambda
                     │
                     ├─ load team memory from DynamoDB
                     ├─ check budget ceiling → refuse if exhausted
-                    ├─ run agent → Bedrock
+                    ├─ save any `remember:` fact (before the call)
+                    ├─ call the model → Groq
                     ├─ ADD tokens_used (atomic)
                     ├─ broadcast token_update + agent_response
                     ├─ set slot IDLE
@@ -121,7 +123,7 @@ One table for every entity type. Simpler to manage, lower latency for co-located
 
 ### 4. The token budget is an enforced ceiling
 
-The Agent Runner refuses to invoke Bedrock once `tokens_used >= token_budget`. This exists for two independent reasons: it is the product thesis (governance that actually governs), and the deployed URL is public and unauthenticated, so it is the primary spend guard. An AWS Budget alarm backstops it. **Never disable this to make a demo work.**
+The Agent Runner refuses to invoke the model once `tokens_used >= token_budget`. This exists for two independent reasons: it is the product thesis (governance that actually governs), and the deployed URL is public and unauthenticated, so it is the primary spend guard. An AWS Budget alarm backstops it. **Never disable this to make a demo work.**
 
 ### 5. Atomic token accounting
 
@@ -136,13 +138,25 @@ ExpressionAttributeValues={':n': token_count}
 
 Lambda is stateless. When a browser closes, its connection ID stays in DynamoDB until a broadcast fails with `GoneException` (HTTP 410). Unhandled, the broadcast loop crashes and every subsequent user stops receiving updates mid-demo. Every `post_to_connection` call is wrapped, and a `GoneException` deletes the connection row immediately.
 
-### 7. Strands Agents SDK, with a boto3 fallback
+### 7. Inference calls out to Groq; everything else is AWS
 
-Strands is the AWS-native agent framework and scores the "AWS open-source project" criterion. It also pulls compiled dependencies (`pydantic-core`) into a Lambda package, and local Python is 3.14 — newer than any Lambda runtime — so wheels must be built in the Lambda image via `sam build --use-container`.
+> **Superseded, 2026-09-18.** The original decision was "Strands Agents SDK, with a boto3
+> `converse` fallback", chosen so the project stayed fully AWS-native. Both options assumed
+> Bedrock was reachable. It is not, on this account, and no amount of configuration fixes it.
 
-**Pre-agreed fallback:** if Strands packaging consumes more than one hour, switch to calling Bedrock directly with boto3 `converse` and tool use. boto3 ships in the Lambda runtime, so packaging risk drops to zero. The project remains fully AWS-eligible either way — AWS services alone satisfy the rule.
+**What was tried.** Bedrock refuses across `us-east-1`, `us-west-2` and `ap-south-1`. Marketplace-served models (Anthropic, AI21, Mistral) return `AccessDeniedException: INVALID_PAYMENT_INSTRUMENT`; a valid card was added and did not change it. First-party Amazon Nova needs no Marketplace subscription and still fails with `ThrottlingException: Too many tokens per day` against a per-day quota of zero that reports `adjustable=False` — so it cannot even be raised by request. 42 of 43 per-day token quotas are zero. That is an account-level restriction, not a setting, and AWS Support will not turn it around before the deadline.
 
-This decision is recorded with its fallback so a future session does not relitigate it under time pressure.
+**The decision.** Inference moves to Groq (`openai/gpt-oss-120b`) over HTTPS from the Agent Runner. The API Gateway WebSocket, both Lambdas, SQS, DynamoDB and Amplify are unchanged. One outbound HTTP call is the entire difference.
+
+**Why this is defensible rather than a retreat.** A governance layer that only works against one vendor's models is a worse governance layer. The scheduler does not care where a token was spent, only that it was counted — and the swap proved that concretely: it touched one function, `_run_agent`, plus a new 130-line `shared/llm.py`. Nothing about the queue, the slot state machine, the atomic accounting or the enforced ceiling moved.
+
+**What it costs.** The project is no longer end-to-end AWS, and the demo says so out loud rather than hiding it. Against the alternative — shipping a stub and calling the token meter an estimate on a product whose entire pitch is token governance — this is the better trade. The counts are now the provider's reported `total_tokens`, so the meter means what it says.
+
+**Implementation notes that cost real time:**
+- `urllib` from the stdlib, no SDK: nothing extra to package, and no compiled wheel to resolve against a local Python 3.14 that does not match the Lambda runtime.
+- The key is an SSM SecureString read at runtime, never a CloudFormation parameter — so a redeploy cannot wipe it and it never enters git.
+- Cloudflare rejects urllib's default User-Agent with HTTP 403 `error code: 1010`, which is indistinguishable from a bad key until you read the body.
+- The stub is retained as an automatic fallback, flagged `estimated`, so a provider outage degrades the answer instead of breaking the workspace.
 
 ### 8. DOM/CSS for the workspace canvas — never a game engine
 

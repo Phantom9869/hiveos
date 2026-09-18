@@ -321,6 +321,14 @@ async def run_demo(url):
                 f"{saved.get('key')} = {saved.get('val')} (by {saved.get('updated_by')})",
             )
 
+            # Anchor on the slot actually going IDLE, not on when this script
+            # got around to looking. `memory_updated` now broadcasts at the
+            # *start* of alice's task rather than after a stub's sleep, so
+            # using it as the anchor silently measured her whole task — 3.4s
+            # reported as though it were dispatch latency.
+            await expect(charlie, "agent_state_update", "charlie",
+                         where=lambda f: f.get("status") == "IDLE"
+                         and f.get("slot_id") == "coder")
             freed_at = time.monotonic()
             dispatched = await expect(charlie, "agent_state_update", "charlie",
                                       where=lambda f: f.get("current_user") == "charlie")

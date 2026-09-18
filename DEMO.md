@@ -34,6 +34,14 @@ Then:
       you will end up with three "Alice"s.
 - [ ] Identities entered: **alice 🐝**, **bob 🦊**, **charlie 🦉**
 - [ ] All three show the same meter — `0 / 5000` — and both slots IDLE
+- [ ] **Browser extensions disabled, or record in a clean profile.** Grammarly injects a
+      floating icon *into the prompt textarea* and it is clearly visible on camera. Found while
+      verifying the deployed page — it was the only thing in the console, and the only thing on
+      screen that is not HiveOS.
+- [ ] Beat 4 of `rehearse.py` printed **`REAL — provider-reported usage`**. If it printed
+      `ESTIMATED`, the model was unreachable: the board still works but the counts are
+      heuristics, and the narration has to say so. Fix it before recording rather than
+      explaining it on camera.
 - [ ] Screen recorder capturing all three windows
 - [ ] Notifications silenced
 
@@ -103,16 +111,16 @@ SQS is the durable at-least-once handoff for tasks that are actually running.
 This runs itself. Alice's task finishes, and three things happen in sequence — let them land.
 
 1. A **toast** fires on all three screens and Alice's fact appears in **team memory**,
-   attributed to her
-2. Her slot frees → **Charlie is auto-dispatched into it** *(rehearsed: 187–234 ms)*, and
+   attributed to her — this lands as her task *starts*, so give it a beat before the rest
+2. Her slot frees → **Charlie is auto-dispatched into it** *(rehearsed: 64–84 ms)*, and
    Charlie's marker on the floor picks up its working indicator
-3. ~5 seconds later Charlie's response arrives — **already carrying Alice's fact**
+3. ~6 seconds later Charlie's response arrives — **already carrying Alice's fact**
 
 > Alice saved one fact for the team. Her slot frees, Charlie is dispatched automatically — he
 > never asked twice — and his agent already knows the deploy window. Nobody told it. That's
 > shared memory across a team's agents.
 
-The meter has moved to roughly **175 / 5000**.
+The meter has moved to roughly **980 / 5000** — about 20%, so it is unmistakably visible.
 
 ### 2:15–2:45 · Where AWS fits
 
@@ -121,12 +129,17 @@ The meter has moved to roughly **175 / 5000**.
 > atomic conditional writes doing the slot claiming and atomic counters doing the token
 > accounting. Amplify hosts the frontend. All serverless, scaling to zero.
 
-**Then say the stub sentence — once, plainly, do not bury it:**
+**Then say the inference sentence — once, plainly, do not bury it:**
 
-> The agent behind these slots is stubbed — Bedrock is quota-blocked on this account — so the
-> text is canned and the token counts are estimates. Everything around it — the scheduling, the
-> queue, the shared memory and the enforced budget ceiling — is real and running on AWS right
-> now.
+> One honest note: Bedrock is quota-blocked on this AWS account, so model inference calls out
+> to Groq. Everything else you just saw is AWS. And the token counts are real — they're the
+> usage the provider reports, not an estimate.
+
+**Do not say the agent is stubbed. It is not — that changed, and the counts are now real.**
+The old caveat undersold a working system; saying it now would be false. If the model is ever
+unreachable mid-take the workspace still answers, but from composed text, and every count it
+produces is flagged `estimated` on screen. `rehearse.py` prints which mode the board is in —
+`REAL` or `ESTIMATED` — in Beat 4. Check it before you record.
 
 ### 2:45–3:00 · What was learned
 
@@ -142,7 +155,7 @@ Worth 15 seconds if the edit has room. It needs its own near-spent board, so it 
 take** — do not try to reach the ceiling during the main sequence.
 
 ```bash
-TOKEN_BUDGET=60 ./scripts/reset-demo.sh
+TOKEN_BUDGET=500 ./scripts/reset-demo.sh
 ```
 
 Run two tasks. The second tips the meter over; the next request is **refused before the agent
@@ -151,9 +164,12 @@ is invoked** and `budget_exhausted` goes out team-wide.
 > At the ceiling the agent is not called at all. Not throttled, not queued — not invoked. Zero
 > tokens spent. That's the difference between a quota and a gauge.
 
-The meter displays **100.0%** and **0 remaining**, even though the underlying count overshot
-slightly (62 of 60) — the last task's cost is only known once it has run, and the UI clamps.
-Rehearse it with `python scripts/rehearse.py --ceiling`.
+The meter displays **100.0%** and **0 remaining**, even though the underlying count overshoots
+(rehearsed at 675 of 500) — a task's cost is only known once it has run, so it cannot be
+charged in advance, and the UI clamps. Rehearse it with `python scripts/rehearse.py --ceiling`.
+
+**500, not 60.** 60 was sized for the stub's ~58-token tasks. A real task costs 200–400, so at
+60 the very first one blows straight past the ceiling and the climb never appears on camera.
 
 ---
 

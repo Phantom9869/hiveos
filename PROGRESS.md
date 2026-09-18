@@ -14,7 +14,7 @@
 | **Project** | HiveOS — OS-style scheduler for a team's shared AI agent budget |
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
-| **Current phase** | **Phase 6 — demo readiness** |
+| **Current phase** | **Phase 6 — demo readiness** (Phase 3 closed out 2026-09-18: the model call is live) |
 | **Phase status** | `BLOCKED — WAITING FOR MANUAL ACTION`. Everything buildable is done and rehearsed, Phase 5 included; **recording, upload and submission are the user's** |
 | **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. Frontend live on Amplify. |
 | **🌐 Public URL** | **https://main.dbavt8jr66qxx.amplifyapp.com** — verified cold, zero setup |
@@ -32,34 +32,98 @@
 
 | # | Phase | Status |
 |---|---|---|
-| 0 | Pre-project setup | `COMPLETE` (Bedrock deferred — see below) |
+| 0 | Pre-project setup | `COMPLETE` (Bedrock abandoned — see below) |
 | 1 | WebSocket backbone | `COMPLETE` |
 | 2 | Scheduler + queue (no LLM) | `COMPLETE` |
-| 3 | Bedrock + agent + memory | `COMPLETE EXCEPT THE MODEL CALL` — memory, token accounting and the ceiling are live |
+| 3 | Model + agent + memory | `COMPLETE` — real model, real provider-reported token counts, enforced ceiling |
 | 4 | Frontend HUD + public URL | `COMPLETE` |
 | 5 | Agent chat + 2D canvas (cuttable) | `COMPLETE` — **un-cut** by user decision, 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
-**Phase 3 was split** (user decisions, 2026-09-18). Phase 4 shipped first because it produces
-the submission; then everything in Phase 3 that does not need a model call was built:
+**Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
+integrated. See *Blocked* below for the evidence, and `ARCHITECTURE.md` decision 7 for the
+reasoning.
 
 | Phase 3 task | State |
 |---|---|
-| 1. Bedrock IAM permissions | **not done** — deliberately. Granting an unused permission is the opposite of least privilege, and it is a 3-line change in the same commit as the model call. |
-| 2. Strands SDK vs boto3 `converse` | **not done** — nothing to integrate until Bedrock is reachable. |
+| 1. Bedrock IAM permissions | **not done, and correctly so.** Bedrock is never called, so granting it would be an unused permission. `template.yaml` records where it would go if Bedrock is ever unblocked. |
+| 2. Strands SDK vs boto3 `converse` | **neither.** Both assumed Bedrock. `shared/llm.py` calls Groq with one stdlib `urllib` POST — no SDK, nothing to package. |
 | 3. The memory tools | `get_team_memory` / `set_team_memory` **done**. `get_task_context` deliberately not built — no task history exists to return; see `CONTRACT.md`. |
-| 4. Load memory before the call | **done** |
-| 5. Token accounting + `token_update` | **done** — mechanism is real; the number is an estimate while stubbed, and flagged as one |
-| 6. Budget ceiling + `budget_exhausted` | **done, enforced, verified** |
-| 7. Cap `max_tokens` per call | n/a until there is a call. `MAX_TOKENS_PER_CALL` is already plumbed. |
+| 4. Load memory before the call | **done** — and verified crossing between users against the deployed URL |
+| 5. Token accounting + `token_update` | **done, and the numbers are now real** — `total_tokens` as the provider reports it, `estimated=False` |
+| 6. Budget ceiling + `budget_exhausted` | **done, enforced, verified** — rehearsed at 675/500, refused, not one token spent |
+| 7. Cap `max_tokens` per call | **done** — `MAX_TOKENS_PER_CALL=400`, a backstop rather than a shaper |
 
-**What remains is one function.** `_run_agent` in `backend/agent_runner/app.py` returns an
-`AgentResult(text, tokens, estimated)`. A real Bedrock call fills the same three fields from
-the response's usage block with `estimated=False`, and nothing else in the system changes.
+**What is still not a real agent:** a fact is saved by the `remember: k = v` prompt convention,
+not by the model deciding to call `set_team_memory`. Tool calling was judged not worth a second
+round trip and a new failure surface against the deadline, with everything else green. This is
+the only place the agent differs in *kind* from the Phase 3 design.
 
 ---
 
 ## Completed
+
+**Phase 3 closed — 2026-09-18 — real model inference on Groq, Bedrock abandoned**
+
+User decision, after one last verification probe: *"if bedrock is not doable then drop it, we
+will use anything else."* Bedrock was re-tested first, per this file's own standing instruction
+— `us-east-1`, `us-west-2` and `ap-south-1`, both vendor classes, all still refusing. Provider
+chosen for zero payment friction, which is what had already cost this project a phase.
+
+- **`backend/shared/llm.py`** — one `urllib` POST. No SDK, so `sam build` has nothing extra to
+  package and there is no compiled wheel to resolve against a local Python 3.14 that does not
+  match the runtime.
+- **The key is an SSM SecureString read at runtime**, cached per container, IAM-scoped to that
+  one parameter. Never in `template.yaml`, the stack, an env var, or git. A redeploy cannot wipe
+  it, and it goes live without one — the runner retries the read on every task until it succeeds.
+- **The stub is retained as an automatic fallback**, flagged `estimated`. A provider blip
+  degrades the answer instead of breaking the workspace mid-take.
+- `MIN_SLOT_SECONDS` (4s) replaces `STUB_DELAY_SECONDS` (5s) — it pads the **slot**, not the
+  model, because a 1.5s call would leave BUSY and a queue position illegible on camera.
+
+**Verified against deployed AWS and the public URL, not exit codes:**
+
+| Check | Result |
+|---|---|
+| `python scripts/ws_smoke.py` | ✅ **58/58** |
+| `python scripts/rehearse.py --takes 2` | ✅ 12/12, twice, unattended |
+| `python scripts/rehearse.py --ceiling` | ✅ 5/5 — 675/500, clamped to 100%, **nothing spent** |
+| Token provenance | ✅ `estimated=False`, provider-reported `total_tokens` |
+| **Memory crosses users with a real model** | ✅ *"Your next deploy is scheduled for Friday at 16:00 UTC"* |
+| Real task driven from the public URL in a browser | ✅ 378 tokens, no `~` prefix, answer used the team fact |
+| Zero app console errors on the deployed page | ✅ (three warnings, all from the Grammarly extension) |
+| Auto-dispatch latency, correctly anchored | ✅ **64–84 ms** |
+
+**Four real failures, each found by running it rather than reading it:**
+
+1. **Cloudflare answers urllib's default User-Agent with HTTP 403 `error code: 1010`.** It looks
+   exactly like a rejected API key and is not one. Only reading the response *body* separated
+   them. Any honest `User-Agent` gets through.
+2. **`llama-3.3-70b-versatile` no longer exists on Groq.** The name this was first written
+   against was already retired, and a wrong model fails at **runtime**, not at deploy. Now
+   listed from `GET /v1/models` rather than guessed twice.
+3. **Editing a template `Default:` does not change a deployed stack.** CloudFormation keeps
+   existing parameter values on update, so a clean `sam deploy` left the Lambda still calling the
+   dead model while the template said otherwise. Pinned in `samconfig.toml`'s
+   `parameter_overrides`.
+4. **Three test assertions encoded the stub's behaviour rather than the system's guarantee.**
+   Two asserted `estimated is True`; the Phase 3 memory gate asserted the literal substring
+   `Friday 16:00 UTC` and failed when the model wrote *"Friday **at** 16:00 UTC"* — while the
+   memory load was perfectly correct. Rewritten as the real invariants, which hold in both modes
+   and are strictly stronger.
+
+**One ordering change with a consequence worth recording.** Saving a fact now happens *before*
+the model call (so it persists even when the model is unreachable, and lands in its own call's
+context) rather than after a stub's sleep. That made `memory_updated` overtake the frame
+`rehearse.py` was waiting on — and its `expect()` **discarded** what it read, so the frame was
+gone by the time the next assertion looked for it. It now buffers per socket. Arrival order is
+the only thing a broadcast harness is not entitled to assume, and this is the second time that
+exact trap has cost time.
+
+**A measurement broke silently in the same change.** Dispatch latency was anchored on
+`memory_updated`, which now fires at task *start* — so it reported 3,454 ms for what is actually
+a 64–84 ms dispatch. Re-anchored on the slot's IDLE broadcast. A number that merely gets worse,
+rather than failing, is the kind a green test will happily carry onto a slide.
 
 **Phase 5 — 2026-09-18 — workspace floor, team chat, toasts**
 
@@ -395,29 +459,21 @@ No traceback anywhere in the run.
 
 | Blocker | Blocks | Status |
 |---|---|---|
-| **Bedrock unusable — account-level zero quotas; card added and did NOT fix it** | Phase 3 only | Needs AWS Support. Phase 3 deferred; Phase 4 shipped on the stub. |
+| **Bedrock unusable — account-level zero quotas; card added and did NOT fix it** | *Nothing any more* | **Closed 2026-09-18 — abandoned, not fixed.** Re-verified in three regions, then inference moved to Groq. Post-hackathon AWS Support ticket at most. |
 
-### What the Bedrock blocker actually costs the demo
+### What the Bedrock blocker cost, and what closed it
 
-Much less than it did, now that the Bedrock-free half of Phase 3 is built. **Every beat in the
-demo script is demonstrable.** What remains missing is narrow:
+**Closed 2026-09-18.** It cost the Phase 3 ordering and roughly a day of diagnosis. It no longer
+costs the demo anything: the agent is real, the token counts are the provider's own, and every
+beat in the demo script is demonstrable with nothing caveated away.
 
-- **The agent's text is composed, not generated.** It echoes the task, lists the team facts it
-  loaded, and says it is a stub. It cannot answer an actual question, so do not ask it one on
-  camera — show it *saving* and *carrying* a fact instead, which is the real claim.
-- **Token counts are estimates**, derived from the real strings (see above). Labelled as such
-  in the UI, so this is disclosed rather than hidden.
-- **A fact is saved by a prompt convention** (`remember: key = value`) rather than by the model
-  choosing to call the tool. The row, the broadcast and the context load are all real.
+The one honest line the video must still carry: **inference runs on Groq because Bedrock is
+quota-blocked on this account; everything else is AWS.** `DEMO.md` has the wording. Do **not**
+say the agent is stubbed — that was true until 2026-09-18 and is now false.
 
-Everything else — the shared board, slot lifecycle, real queue positions, auto-dispatch,
-shared memory crossing users, the enforced ceiling — is live and verified above.
-
-Per `PRD.md`, the honest framing is fallback ladder rung 3: *mock agent responses, stated
-plainly.* One sentence covers it: **"The agent behind these slots is stubbed — Bedrock is
-quota-blocked on this account — so the text is canned and the token counts are estimates.
-Everything around it, the scheduling, the queue, the shared memory and the enforced budget
-ceiling, is real and running on AWS right now."**
+The diagnosis below is kept because it is the evidence for that sentence, and because a future
+session must not waste hours re-testing Bedrock hoping for a different answer. One `converse`
+call is enough to detect if it ever unlocks.
 
 ### ⛔ Card added 2026-09-18 — did not unblock Bedrock
 
@@ -572,8 +628,9 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Manual actions pending
 
-> The "add a card" action that used to sit here is **done** — Visa •••• 3306 is on the account
-> and set as default. It did not unblock Bedrock. Do not repeat it.
+> Two actions that used to sit here are **done**. The card: Visa •••• 3306 is on the account and
+> set as default — it did not unblock Bedrock, do not repeat it. The model API key: the SSM
+> SecureString `/hiveos/groq-api-key` exists and the agent is live against it.
 
 **These three are the only things standing between the repo and a submission.** Everything
 buildable is done, deployed and rehearsed.
@@ -591,10 +648,9 @@ Housekeeping, not blocking:
 
 4. **Confirm AWS Budget notification email** — check `arunishrajput7@gmail.com` for the
    `hiveos-guardrail` subscription confirmation.
-5. **Optional, Phase 3 only: open an AWS Support case** about the account-level Bedrock
+5. **Optional, post-hackathon: open an AWS Support case** about the account-level Bedrock
    restriction (42 of 43 per-day token quotas at zero, `adjustable=False`, first-party Amazon
-   Nova included). Will not turn around before 2026-09-20, so this is for after the hackathon.
-   Nothing in the remaining plan waits on it.
+   Nova included). Nothing waits on it any more — inference runs on Groq and Phase 3 is closed.
 
 Items 4 and 5 do not block the submission. Items 1–3 **are** the submission.
 
@@ -602,6 +658,27 @@ Items 4 and 5 do not block the submission. Items 1–3 **are** the submission.
 
 ## Known issues and discoveries
 
+- **A test asserting a placeholder's behaviour will fail when the placeholder improves.** Three
+  checks broke on the model swap and none was a product bug: two asserted `estimated is True`
+  (only ever true of the stub) and the Phase 3 memory gate demanded the literal substring
+  `Friday 16:00 UTC`, failing on a model's natural *"Friday **at** 16:00 UTC"*. Write the
+  guarantee, not the current implementation's phrasing.
+- **Cloudflare rejects urllib's default User-Agent with HTTP 403 `error code: 1010`**, which is
+  indistinguishable from a bad API key until you read the response *body*. Any outbound call
+  from a Lambda to a third-party API needs an explicit `User-Agent`.
+- **Changing a `Default:` in `template.yaml` does not change a deployed stack.** CloudFormation
+  keeps existing parameter values on update. A clean `sam deploy` will happily leave the old
+  value in place — pin it in `samconfig.toml`'s `parameter_overrides` instead.
+- **Groq retires model names.** `llama-3.3-70b-versatile` was already gone. A wrong model id
+  fails at runtime, not at deploy. List with `GET https://api.groq.com/openai/v1/models`.
+- **`expect()` discarding frames it read is a permanent trap, not a one-off.** It has now cost
+  time twice. `rehearse.py` buffers per socket; `ws_smoke.py` still filters on identifying
+  fields instead, which works but is weaker. If `ws_smoke` ever flakes on a missing frame, port
+  the buffer across.
+- **A silently-wrong measurement survives a green test.** Dispatch latency was anchored on
+  `memory_updated`; moving the memory save earlier turned that number into "alice's whole task"
+  (3,454 ms vs the true 64–84 ms) and every check still passed. Anchor a timing on the event it
+  actually names.
 - **Never build a `Decimal` from a float for DynamoDB.** `Decimal(24.92)` carries the binary
   expansion and boto3's `DYNAMODB_CONTEXT` raises `decimal.Inexact`; `Decimal(str(24.92))` is
   exact. Anywhere a non-integer reaches DynamoDB, this is waiting. It only reproduces with
@@ -724,7 +801,8 @@ Items 4 and 5 do not block the submission. Items 1–3 **are** the submission.
 | WebSocket API `hiveos-ws` | ✅ `mel2gpat9c`, stage `prod` |
 | Router Lambda `hiveos-router` | ✅ verified end to end |
 | SQS `hiveos-agent-tasks` + DLQ | ✅ both empty, nothing dead-lettered |
-| Agent Runner `hiveos-agent-runner` | ✅ verified end to end (stub agent) |
+| Agent Runner `hiveos-agent-runner` | ✅ verified end to end — **real model**, provider-reported tokens |
+| SSM `/hiveos/groq-api-key` | ✅ SecureString, read at runtime, IAM-scoped to the Agent Runner |
 | Amplify app `hiveos` / public URL | ✅ `dbavt8jr66qxx` → https://main.dbavt8jr66qxx.amplifyapp.com |
 
 **The Amplify app is not managed by CloudFormation.** This is deliberate and matches
@@ -740,8 +818,9 @@ and no build service role, which makes it fully scriptable. The consequence is t
 
 **Record the video.** Nothing else moves the submission forward.
 
-Every feature in `PRD.md`'s Must list is built, deployed and verified; Phase 5 is cut; the
-recorded sequence passes 12/12 twice unattended and takes ~14 s of product time. There is
+Every feature in `PRD.md`'s Must list is built, deployed and verified. Phase 5 was built, not
+cut. Phase 3 is closed — the agent is real and the token counts are the provider's own. The
+recorded sequence passes 12/12 twice unattended and takes ~13 s of product time. There is
 nothing left to build that improves the submission more than a clean take does. **Do not start
 new work in a fresh session — open `DEMO.md` and record.**
 
@@ -756,10 +835,11 @@ Then follow `DEMO.md` beat by beat, and finish the three items in *Manual action
 > claim a slot and then save a fact, which the scheduler does not allow — rehearsal caught it.
 > Two run sheets is how a wrong one gets followed at 2 a.m.
 
-If Bedrock is ever unblocked: open with one `bedrock-runtime converse` call and nothing more —
-the evidence says it needs AWS Support. Then fill in `_run_agent` and add
-`bedrock:InvokeModel` to the Agent Runner role in `template.yaml` (the Phase 3 section is
-already stubbed out with a comment). Nothing else changes.
+If Bedrock is ever unblocked: one `bedrock-runtime converse` call to detect it and nothing
+more — the evidence says it needs AWS Support. Then swap the body of `shared/llm.py:complete`
+and add `bedrock:InvokeModel` to the Agent Runner role in `template.yaml` (the Phase 3 section
+records where). Nothing else changes — which is the point of having moved the call behind that
+seam.
 
 ### Standing gotchas for the recording
 

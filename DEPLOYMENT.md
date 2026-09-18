@@ -16,7 +16,8 @@ Operational AWS guide. Every step is tagged **`AUTOMATED`** (Claude Code runs it
 |---|---|
 | AWS CLI | ✅ 2.36.47 |
 | AWS credentials | ✅ IAM user `hiveos-dev` (Manual Action 1 done) |
-| Bedrock model access | ⛔ **Blocked account-wide** — not a config problem. `PROGRESS.md` |
+| Bedrock model access | ⛔ **Blocked account-wide, and abandoned** — not a config problem. Inference runs on Groq; see `ARCHITECTURE.md` decision 7 |
+| Model API key | ✅ SSM SecureString `/hiveos/groq-api-key`, read at runtime |
 | Docker daemon | ✅ running (Manual Action 3 done) |
 | AWS SAM CLI | ✅ 1.166.2 |
 | Node / npm | ✅ 26.8.2 / 11.19.1 |
@@ -104,7 +105,54 @@ aws bedrock-runtime converse \
 
 **Resume by:** telling Claude Code *"Bedrock access granted"*. Claude Code records the working ID in `CONTRACT.md`.
 
-> If access is denied or unavailable on a Free Plan account, say so. Phases 1–2 and 4 do not need Bedrock, and `BUILD_PLAN.md` carries a documented mock-agent fallback.
+> ### ⛔ Superseded, 2026-09-18 — this entire manual action is obsolete
+>
+> Bedrock is blocked account-wide and the block is not a setting: `us-east-1`, `us-west-2` and
+> `ap-south-1` all refuse, 42 of 43 per-day token quotas are zero and report
+> `adjustable=False`, and first-party Amazon Nova — which needs neither a Marketplace
+> subscription nor a payment instrument — fails identically. The use-case form was submitted and
+> cleared; that was never the binding constraint.
+>
+> **Inference runs on Groq instead — see MANUAL ACTION 2b.** Do not spend session time
+> re-attempting this. One `converse` call is enough to detect if it ever unlocks.
+
+---
+
+## MANUAL ACTION 2b — Provision the model API key
+
+**Reason:** The Agent Runner reads its model API key from SSM Parameter Store at runtime.
+Without it every task falls back to composed text flagged `estimated`.
+
+**Location:** <https://console.groq.com> → sign in (Google/GitHub, free, **no card required**)
+→ **API Keys** → **Create API Key**. The key is shown once and begins with `gsk_`.
+
+**Steps:** run this in a normal terminal — not through an agent session, where the key would
+land in a transcript:
+
+```bash
+aws ssm put-parameter \
+  --name /hiveos/groq-api-key \
+  --type SecureString \
+  --value 'gsk_...' \
+  --region us-east-1 \
+  --overwrite
+```
+
+**Expected result:** JSON containing `"Version": 1`. **No redeploy is needed** — the Lambda
+retries the SSM read on every task until it succeeds, so the key goes live by itself.
+
+**Verification:**
+
+```bash
+aws ssm get-parameter --name /hiveos/groq-api-key --region us-east-1 --query 'Parameter.Type'
+# → "SecureString"   (reads the type only, never the value)
+python3 scripts/ws_smoke.py   # 58/58, and token frames report estimated=False
+```
+
+**Status:** done, 2026-09-18. Verified live on the public URL.
+
+> The key never enters `template.yaml`, `samconfig.toml`, an environment variable, or git. The
+> Agent Runner's IAM grant is scoped to this one parameter.
 
 ---
 
@@ -261,7 +309,10 @@ aws logs tail /aws/lambda/hiveos-router --follow --since 10m
 | Symptom | Cause | Fix |
 |---|---|---|
 | `NoCredentials` on every call | Credentials not configured | Manual Action 1 |
-| `AccessDeniedException` calling Bedrock | Model access not granted | Manual Action 2 |
+| `AccessDeniedException` calling Bedrock | Account-wide Bedrock block — **expected, do not chase** | Nothing. Inference runs on Groq |
+| Agent replies `[coder · offline]` | The model call failed; the fallback answered | `sam logs -n AgentRunnerFunction --stack-name hiveos` and grep `model call failed` — the reason is logged verbatim |
+| `groq HTTP 403 ... error code: 1010` | Cloudflare rejected the User-Agent | Not a bad key. `shared/llm.py` must send an explicit `User-Agent` |
+| `groq HTTP 404 model_not_found` | Groq retired the model name | List `GET https://api.groq.com/openai/v1/models`, update `samconfig.toml` |
 | `sam build` fails on a compiled dependency | Built with local Python 3.14 | Use `sam build --use-container` |
 | `sam build --use-container` cannot connect | Docker daemon down | Manual Action 3 |
 | Broadcast fails with `403` | Missing `execute-api:ManageConnections` | Add to the Lambda IAM policy in `template.yaml` |
@@ -277,7 +328,7 @@ aws logs tail /aws/lambda/hiveos-router --follow --since 10m
 
 | Guard | Where |
 |---|---|
-| Server-side token ceiling — refuses Bedrock at 100% | Agent Runner (`ARCHITECTURE.md` decision 4) |
+| Server-side token ceiling — refuses to call the model at 100% | Agent Runner (`ARCHITECTURE.md` decision 4) |
 | Low `max_tokens` per call | `MAX_TOKENS_PER_CALL` env var |
 | Fastest/cheapest model with access | `BEDROCK_MODEL_ID` in `CONTRACT.md` |
 | AWS Budget alarm (~$20) | Manual Action 4 |

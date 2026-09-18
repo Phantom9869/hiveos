@@ -70,7 +70,7 @@ browser compared against the acting browser's click — not a server-side round 
 Browser ──wss──► API Gateway WebSocket ──► Router Lambda ──► DynamoDB
                                                 │                 ▲
                                                 ▼                 │
-                                               SQS ──► Agent Runner Lambda ──► Bedrock
+                                               SQS ──► Agent Runner Lambda ──► Groq
 ```
 
 | Service | Job |
@@ -82,7 +82,7 @@ Browser ──wss──► API Gateway WebSocket ──► Router Lambda ──�
 | **Amplify Hosting** | The React frontend and the public URL |
 | **CloudFormation / SAM** | All infrastructure as code in one `template.yaml` |
 | **AWS Budgets** | A spend backstop behind the in-app ceiling |
-| **Bedrock** | Wired into the architecture and IAM surface — **not invoked**, see below |
+| **SSM Parameter Store** | Holds the model API key as a SecureString, read at runtime — never in the template, the stack, or git |
 
 Two AWS design decisions worth naming:
 
@@ -101,39 +101,48 @@ demo work.
 
 ---
 
-## Honest status: the agent is stubbed
+## Honest status: inference is the one thing not on AWS
 
 **Amazon Bedrock is blocked account-wide on this AWS account.** 42 of 43 per-day token quotas
 sit at zero and are marked `adjustable=False`, so they cannot be raised even by request —
 including first-party Amazon Nova, which needs no Marketplace subscription and no payment
-instrument. I diagnosed this down to the account level: adding a card fixed a genuine, separate
-`INVALID_PAYMENT_INSTRUMENT` failure for third-party models, and Nova still returned
-`ThrottlingException: Too many tokens per day` against a zero quota. That is an AWS Support
-matter, not a config fix, and it was not going to turn around before the deadline.
+instrument. I diagnosed this to the account level rather than guessing: adding a card fixed a
+genuine, separate `INVALID_PAYMENT_INSTRUMENT` failure for third-party models, and Nova still
+returned `ThrottlingException: Too many tokens per day` against a zero quota. I re-verified in
+three regions — `us-east-1`, `us-west-2`, `ap-south-1` — before giving up on it. That is an AWS
+Support matter, not a config fix, and it was never going to turn around before the deadline.
 
-So the agent returns composed text instead of model output, and its token counts are
-**estimates** — `len(prompt + memory + response) / 4`, the standard heuristic, computed over the
-real strings.
+**So model inference calls out to Groq (`openai/gpt-oss-120b`) over HTTPS.** Everything else —
+the WebSocket API, both Lambdas, SQS, DynamoDB, SSM, Amplify, SAM — is AWS. One outbound HTTP
+call is the entire difference.
 
-I treated this as a correctness problem rather than a cosmetic one, because the product's entire
-pitch is token governance and a meter reporting invented numbers would be the worst possible
-thing to ship:
+I think that is the right call rather than a retreat, for a reason the product itself argues: a
+governance layer that only works against one vendor's models is a worse governance layer. The
+scheduler does not care where a token was spent, only that it was counted. The swap proved it
+concretely — it touched exactly one function plus a new 130-line client, and nothing about the
+queue, the slot state machine, the atomic accounting or the enforced ceiling moved.
 
-- every frame carrying a count sets an `estimated` flag
-- the UI labels the meter *"estimated, the agent is stubbed"* and prefixes per-task costs with `~`
-- `README.md`, `PROGRESS.md` and the video all say so in plain text
+**The counts are real.** `tokens_used` is the `total_tokens` the provider reports, not an
+estimate — which matters, because a product whose entire pitch is token governance cannot show
+invented numbers.
 
-During verification I found a real hole in that safeguard: the flag rode only on live
+**The workspace degrades instead of breaking.** If the model is unreachable, the Agent Runner
+still answers from composed text and charges the standard `len(text)/4` heuristic — but every
+frame carrying such a count sets an `estimated` flag, the UI says *"partly estimated — the model
+was unreachable"*, and per-task costs get a `~` prefix. The flag is sticky, so one degraded call
+marks the whole total for as long as it stands. A degraded answer never gets laundered into a
+billed-looking meter.
+
+During verification I found a real hole in that safeguard: the flag originally rode only on live
 `token_update` frames, so a browser opening the URL cold — *which is every judge* — saw an
-unlabelled number that was in fact an estimate. Fixed by persisting the provenance on the
-metadata row and returning it on `state_snapshot`, with a smoke-test check for exactly that case.
+unlabelled number. Fixed by persisting the provenance on the metadata row and returning it on
+`state_snapshot`, with a smoke-test check for exactly that case.
 
-**Everything around the model call is real and verified:** atomic slot claims, the FIFO queue
-and auto-dispatch, WebSocket fan-out with stale-connection cleanup, shared team memory crossing
-between users, atomic token accounting, and the enforced ceiling. `_run_agent` in
-`backend/agent_runner/app.py` returns `AgentResult(text, tokens, estimated)` — a Bedrock call
-fills the same three fields from the response's usage block and nothing else in the system
-changes.
+**One gap I chose not to close.** A fact is saved by a `remember: key = value` prompt convention
+rather than the model deciding to call `set_team_memory` itself. Tool calling adds a second
+round trip and a failure surface, and with the rest green and a deadline close, it was not worth
+the risk. Everything the convention then touches — the row, the broadcast, the context load on
+the next task — is the real mechanism.
 
 ---
 
@@ -178,8 +187,26 @@ model-access problem. The thing that actually resolved it was reading 1,123 serv
 noticing that two different vendors failed identically — which ruled out everything in my
 codebase in one step.
 
-**Ship the thing that survives being cut.** I built the deployed public URL before the Bedrock
+**Ship the thing that survives being cut.** I built the deployed public URL before the model
 integration, against the plan's own ordering. That inversion is why there is a submission at all.
+
+**Tests that encode a placeholder's behaviour break when the placeholder gets better.** Swapping
+the stub for a real model broke three checks, and not one of them was a product bug. Two
+asserted `estimated is True` — only ever true of the stub. The third was the Phase 3 memory
+gate, asserting the response contained the literal string `Friday 16:00 UTC`; the real model
+wrote *"Friday **at** 16:00 UTC"* and the gate failed on an inserted preposition while the
+memory load was perfectly correct. Each had been written against what the stub *happened to do*
+rather than what the system must *guarantee*. Rewritten as the real invariants — the frame
+declares its provenance, an estimated call stickily flags the total, and the answer demonstrates
+knowledge of the fact however phrased — they now hold in both modes and are strictly stronger.
+
+**The failure a layer below yours will impersonate your own.** Three of the four real defects in
+that swap looked like something they were not: Cloudflare rejecting the stdlib's default
+User-Agent returns HTTP 403, indistinguishable from a bad API key until you print the body; a
+retired model name fails at *runtime*, not deploy; and CloudFormation keeps a deployed stack's
+existing parameter values on update, so editing a template `Default:` changed nothing and the
+Lambda kept calling the dead model after a clean deploy. Reading the actual error body, once,
+beat every hypothesis I had.
 
 ---
 

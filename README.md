@@ -22,23 +22,26 @@ Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 - The budget is an **enforced ceiling**, not a gauge — the server refuses to spend past it
 - A shared **workspace floor** shows who is present and who is mid-task, live on every screen
 
-**Status.** Everything above is live, deployed and verified against real AWS (58/58 end-to-end
-checks — `scripts/ws_smoke.py`), with one honest exception:
+**Status.** Everything above is live, deployed and verified against real AWS — 58/58 end-to-end
+checks (`scripts/ws_smoke.py`) and the full demo sequence 12/12 twice unattended
+(`scripts/rehearse.py`). The agent is real and the token counts are the provider's reported
+usage, not estimates.
 
-> **The agent behind the slots is a stub.** Amazon Bedrock is blocked by an account-level quota
-> restriction on this AWS account — 42 of 43 per-day token quotas sit at zero and are not
-> adjustable — so no model is called. The stub returns composed text, and its token counts are
-> **estimates** (`len(prompt + memory + response) / 4`) rather than billed usage. Every frame
-> and the UI label them as estimates; the meter reads *"estimated, the agent is stubbed"*.
+> **One honest note: model inference is the only thing not running on AWS.** Amazon Bedrock is
+> blocked account-wide here — `us-east-1`, `us-west-2` and `ap-south-1` all refuse, Marketplace
+> models with `INVALID_PAYMENT_INSTRUMENT` and first-party Amazon Nova against a per-day token
+> quota of zero that reports `adjustable=False`. 42 of 43 quotas sit at zero. That is an
+> account-level restriction, not a setting.
 >
-> Everything around it is real: the atomic slot claims, the FIFO queue and auto-dispatch, the
-> WebSocket fan-out, the shared memory, the atomic token accounting, and the **enforced** budget
-> ceiling — at 100% the agent is genuinely not invoked and not one token is spent.
+> Inference therefore calls out to Groq (`openai/gpt-oss-120b`) over HTTPS. The API Gateway
+> WebSocket, both Lambdas, SQS, DynamoDB and Amplify are unchanged — one outbound HTTP call is
+> the entire difference, and it touched exactly one function.
 >
-> `_run_agent` in `backend/agent_runner/app.py` is the single seam a real model call drops into:
-> it returns `AgentResult(text, tokens, estimated)`, and Bedrock fills the same three fields.
+> If the model is ever unreachable the workspace still answers, from composed text, and flags
+> those counts `estimated` everywhere they appear — including on `state_snapshot`, so a browser
+> loading cold is told too. A degraded answer never gets laundered into a billed-looking meter.
 
-See `PROGRESS.md` for the full evidence and `ARCHITECTURE.md` decision 7 for the fallback.
+See `PROGRESS.md` for the full evidence and `ARCHITECTURE.md` decision 7 for the reasoning.
 
 ---
 
@@ -48,7 +51,7 @@ See `PROGRESS.md` for the full evidence and `ARCHITECTURE.md` decision 7 for the
 Browser ──wss──► API Gateway WebSocket ──► Router Lambda ──► DynamoDB
                                                 │                 ▲
                                                 ▼                 │
-                                               SQS ──► Agent Runner Lambda ──► Bedrock
+                                               SQS ──► Agent Runner Lambda ──► Groq
 ```
 
 React frontend on Amplify Hosting. Everything serverless, scaling to zero.
@@ -86,7 +89,16 @@ brew install aws-sam-cli
 aws configure                 # see DEPLOYMENT.md, Manual Action 1
 ```
 
-Bedrock model access must be requested in the console before the agent works — `DEPLOYMENT.md`, Manual Action 2.
+The agent needs a model API key before it will answer. It is read at runtime from SSM
+Parameter Store and never stored in this repository:
+
+```bash
+aws ssm put-parameter --name /hiveos/groq-api-key --type SecureString \
+  --value 'gsk_...' --region us-east-1 --overwrite
+```
+
+Get a free key at <https://console.groq.com> (no card required). Without it the workspace
+still runs — every task falls back to composed text flagged `estimated`.
 
 ---
 
@@ -163,7 +175,10 @@ template.yaml      SAM — all AWS infrastructure
 
 **Built and deployed:** shared token meter · agent slots · FIFO queue with live position · auto-dispatch · shared team memory · enforced budget ceiling · shared workspace floor · team chat · public URL.
 
-**Not built:** the Bedrock model call (account-blocked, see Status).
+**Not built:** model-decided tool calling — a fact is saved by the `remember: k = v` prompt
+convention rather than the model choosing to invoke `set_team_memory`. Everything it touches —
+the row, the broadcast, the context load on the next task — is the real mechanism. See
+`CONTRACT.md`.
 
 **Deliberately excluded:** authentication, multiple teams, game-engine graphics, token-level preemption, calendar/email integrations. See `PRD.md` and `ARCHITECTURE.md` for why.
 
@@ -171,9 +186,10 @@ template.yaml      SAM — all AWS infrastructure
 
 ## Built with
 
-AWS Lambda · API Gateway WebSocket · DynamoDB · SQS · AWS SAM · Amplify Hosting · React + Vite
+AWS Lambda · API Gateway WebSocket · DynamoDB · SQS · SSM Parameter Store · AWS SAM ·
+Amplify Hosting · React + Vite
 
-Amazon Bedrock is wired into the architecture and the IAM surface but is not yet invoked — see
-**Status** above.
+Model inference runs on Groq because Amazon Bedrock is blocked account-wide on this account —
+see **Status** above.
 
 Developed with Claude Code as the implementation assistant.
