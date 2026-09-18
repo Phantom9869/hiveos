@@ -134,6 +134,35 @@ Hard zeros that cannot be raised via Service Quotas indicate an account still on
 proceed. If quotas unlock, real Bedrock drops into Phase 3 unchanged. If not, fall back per
 `ARCHITECTURE.md` decision 7.
 
+#### Re-check after Phase 1 (2026-09-18) — error signature changed, quotas did not
+
+Still **not** on the Paid Plan. Quotas are byte-for-byte identical to the first
+investigation: 1123 quotas, **42 of 43 per-day token quotas at zero, 0 adjustable**, only
+the 150,000,000 `Cross-Model Account-Level Tokens Per Day` pool non-zero.
+
+What *did* change is the error for third-party models:
+
+| Model | Before | Now |
+|---|---|---|
+| `us.anthropic.claude-haiku-4-5` | `ThrottlingException: Too many tokens per day` | `AccessDeniedException: INVALID_PAYMENT_INSTRUMENT` |
+| `ai21.jamba-1-5-mini` | `ThrottlingException: Too many tokens per day` | `AccessDeniedException: INVALID_PAYMENT_INSTRUMENT` |
+| `us.amazon.nova-lite-v1:0` | — | `ThrottlingException: Too many tokens per day` (unchanged) |
+
+```
+Model access is denied due to INVALID_PAYMENT_INSTRUMENT: A valid payment
+instrument must be provided.. Your AWS Marketplace subscription for this model
+cannot be completed at this time.
+```
+
+The split is diagnostic. Third-party models need an AWS Marketplace subscription, which
+requires a valid payment instrument — that is now the binding failure. Amazon's own Nova
+needs no subscription, so it falls straight through to the Free Plan per-day quota of zero.
+
+**Conclusion: the upgrade did not complete. The card on the account is missing, declined,
+or unverified.** Fixing the payment instrument is the prerequisite; the plan upgrade cannot
+complete without it. There is no AWS API that reports plan tier directly — this is inferred
+from quota state plus the two error signatures.
+
 **Impact is confined to Phase 3.** Phase 2 already specifies a stub agent, so the queue,
 slot scheduler, token accounting, WebSocket sync and the deployed URL are all buildable now.
 
@@ -151,7 +180,15 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Manual actions pending
 
-1. **Attempt AWS Paid Plan upgrade** — Billing console → account settings. Unblocks Phase 3.
+1. **Fix the payment instrument, then upgrade to the Paid Plan** — in this order; the
+   upgrade cannot complete without a valid card.
+   - `https://console.aws.amazon.com/billing/home#/paymentpreferences` — add or replace the
+     card, confirm it verifies without a warning banner
+   - `https://console.aws.amazon.com/billing/home#/account` → **AWS Free Tier** section →
+     upgrade to the Paid Plan
+   - Verify: `aws bedrock-runtime converse --region us-east-1 --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 --messages '[{"role":"user","content":[{"text":"Say OK"}]}]' --inference-config '{"maxTokens":10}'`
+     must return a completion, not `INVALID_PAYMENT_INSTRUMENT` or `ThrottlingException`.
+   - Unblocks Phase 3 only. Phase 2 does not need it.
 2. **Confirm AWS Budget notification email** — check `arunishrajput7@gmail.com` for the
    `hiveos-guardrail` subscription confirmation.
 
