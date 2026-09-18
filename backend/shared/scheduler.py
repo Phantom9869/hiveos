@@ -11,8 +11,8 @@ what stops the two paths from drifting into different state machines.
 
 Ordering rules that matter (ARCHITECTURE.md decision 1):
   - SQS carries tasks that are RUNNING. Waiting tasks live in DynamoDB.
-  - The QUEUE# delete is the exactly-once gate. Whoever wins the delete owns
-    the task, so two runners finishing together cannot dispatch it twice.
+  - The QUEUE# delete is the exactly-once gate. Whoever wins the delete owns the
+    task, so two runners finishing together cannot dispatch it twice.
 """
 
 import json
@@ -55,8 +55,8 @@ def _is_conditional_failure(error):
 def try_claim(team, slot_id, user_id):
     """Atomically take one slot. False means somebody else already had it.
 
-    The ConditionExpression is the whole point: this is the only correct way
-    to claim, and a read-then-write here would hand both users the same slot
+    The ConditionExpression is the whole point: this is the only correct way to
+    claim, and a read-then-write here would hand both users the same slot
     under exactly the load the demo creates.
     """
     try:
@@ -232,7 +232,7 @@ def broadcast_queue(team):
 # --- The release path ------------------------------------------------------
 
 
-def release_and_dispatch(team,slot_id, expected_holder):
+def release_and_dispatch(team, slot_id, expected_holder):
     """Free a slot, then start the next waiting task. Returns the slot used.
 
     This runs in the Agent Runner's finally block, so it must work even when
