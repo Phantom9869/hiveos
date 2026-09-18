@@ -29,15 +29,21 @@ Parameters:
 
   MaxTokensPerCall:
     Type: Number
-    Default: 1024
-    Description: Per-invocation output cap. Keeps a runaway loop cheap.
+    Default: 400
+    Description: >
+      Per-invocation output cap. Keeps a runaway loop cheap. A backstop, not a
+      shaper — the system prompt is what keeps answers to three sentences, and
+      a response truncated mid-word by this cap looks broken on camera.
 
   GroqModel:
     Type: String
-    Default: llama-3.3-70b-versatile
+    Default: openai/gpt-oss-120b
     Description: >
-      Inference model. Groq retires model names periodically; if calls start
-      failing with model_not_found this is the only thing that changes.
+      Inference model. Groq retires model names periodically — the Llama 3.3
+      name this was first written against was already gone. If calls start
+      failing with model_not_found, list the current ids with
+      `GET https://api.groq.com/openai/v1/models` and change this; it is the
+      only thing that moves.
 
   GroqKeyParam:
     Type: String

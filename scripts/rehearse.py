@@ -61,6 +61,18 @@ def check(name, ok, detail=""):
     return ok
 
 
+def knows_fact(text, value):
+    """Does this answer demonstrate knowledge of `value`, however phrased?
+
+    Every token must appear, but not contiguously — a real model writes
+    "Friday **at** 16:00 UTC" and a substring match fails on the preposition
+    while the memory load was in fact correct. Kept identical to the copy in
+    `ws_smoke.py`; if one changes, change both.
+    """
+    haystack = text.lower()
+    return all(token in haystack for token in value.lower().split())
+
+
 class Beat:
     """Times a demo beat and reports it against the recording budget."""
 
@@ -146,10 +158,32 @@ def restore_standard_budget(used_budget):
     print(f"   budget back to {STANDARD_BUDGET}; ws_smoke.py will behave")
 
 
+# Frames that arrived while `expect` was waiting for a *different* one. They
+# used to be dropped on the floor, which made the harness order-sensitive in a
+# way the product is not: `memory_updated` now broadcasts at the start of a
+# task rather than after it, so it overtakes the `agent_state_update` being
+# awaited, and the next `expect` looked for a frame that had already been read
+# and thrown away — failing 25s later with a message pointing nowhere near the
+# cause. Buffering per socket makes arrival order irrelevant, which is the only
+# assumption a broadcast harness is entitled to make.
+_pending = {}
+
+
+def _buffer(ws):
+    return _pending.setdefault(ws, [])
+
+
 async def expect(ws, event, who, timeout=RECV_TIMEOUT, where=None):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    seen = []
+    buffered = _buffer(ws)
+
+    # Anything that arrived early is still here, in arrival order.
+    for i, frame in enumerate(buffered):
+        if frame.get("event") == event and (where is None or where(frame)):
+            return buffered.pop(i)
+
+    seen = list(buffered)
     while True:
         remaining = deadline - loop.time()
         try:
@@ -163,10 +197,12 @@ async def expect(ws, event, who, timeout=RECV_TIMEOUT, where=None):
         frame = json.loads(raw)
         if frame.get("event") == event and (where is None or where(frame)):
             return frame
+        buffered.append(frame)
         seen.append(frame)
 
 
 async def drain(ws):
+    _buffer(ws).clear()
     while True:
         try:
             await asyncio.wait_for(ws.recv(), 0.25)
@@ -299,7 +335,7 @@ async def run_demo(url):
                                     where=lambda f: f.get("user_id") == "charlie")
             check(
                 "**charlie's agent already knows alice's fact — nobody told it**",
-                FACT_VAL in answered.get("text", ""),
+                knows_fact(answered.get("text", ""), FACT_VAL),
                 answered.get("text", "").replace("\n", " ")[:120],
             )
 
@@ -452,9 +488,12 @@ def main():
     args = parser.parse_args()
 
     url = args.url or stack_output("WebSocketURL")
-    # 60 for the ceiling take: a stub task estimates at roughly that, so the
-    # first or second task tips the meter over on camera without a long wait.
-    budget = args.budget or (60 if args.ceiling else STANDARD_BUDGET)
+    # 500 for the ceiling take. A real task costs roughly 200-400 tokens, so
+    # this lets the meter visibly climb across two tasks and then refuse the
+    # third — the refusal reads as a control rather than an instant wall. Was
+    # 60 while the agent was stubbed, at which a single real task now blows
+    # straight past the ceiling and the climb is invisible.
+    budget = args.budget or (500 if args.ceiling else STANDARD_BUDGET)
     beat = run_ceiling if args.ceiling else run_demo
 
     print(f"Endpoint: {url}")

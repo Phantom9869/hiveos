@@ -51,6 +51,22 @@ def check(name, ok, detail=""):
     return ok
 
 
+def knows_fact(text, value):
+    """Does this answer demonstrate knowledge of `value`, however phrased?
+
+    Every token must appear, but not contiguously. A substring match was fine
+    against the stub, which echoed the fact verbatim — a real model writes
+    "Friday **at** 16:00 UTC" and the gate failed on an inserted preposition
+    while the agent had in fact loaded the memory correctly.
+
+    Still deliberately strict: it demands every token, because this is the
+    Phase 3 gate and a loose match here would let a genuinely broken memory
+    load pass on a coincidental word.
+    """
+    haystack = text.lower()
+    return all(token in haystack for token in value.lower().split())
+
+
 def aws(*args):
     proc = subprocess.run(
         ["aws", *args, "--region", REGION, "--output", "json"],
@@ -559,7 +575,7 @@ async def run_memory_and_budget(url):
                             where=lambda f: f.get("user_id") == "bob")
     check(
         "bob's agent already knows alice's fact without being told",
-        "Friday 16:00 UTC" in answered.get("text", ""),
+        knows_fact(answered.get("text", ""), "Friday 16:00 UTC"),
         answered.get("text", "")[:160],
     )
 

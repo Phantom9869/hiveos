@@ -35,9 +35,11 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 # Name of the SSM SecureString holding the key. The *name* is not a secret.
 KEY_PARAM_NAME = os.environ.get("GROQ_KEY_PARAM", "/hiveos/groq-api-key")
 
-# Groq retires model names periodically. If this one starts returning a 404
-# with `model_not_found`, it is a one-variable change and nothing else moves.
-MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Groq retires model names periodically — the Llama 3.3 name this was first
+# written against was already gone by the time it was deployed. If this starts
+# returning 404 `model_not_found`, list the current ids with
+# `GET https://api.groq.com/openai/v1/models`; it is a one-variable change.
+MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Per-call output cap — the same spend guard the Bedrock plan specified.
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "1024"))
@@ -46,15 +48,29 @@ MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_CALL", "1024"))
 # hung provider surfaces as a fallback rather than as a redelivered task.
 TIMEOUT_SECONDS = 20
 
+# Identifies this client to the provider's edge. See the note in `complete`:
+# the stdlib default is blocked by Cloudflare, so this is load-bearing.
+USER_AGENT = "HiveOS/1.0 (+https://github.com/arunishrajput/hiveos)"
+
 # Low but not zero: the demo asks the same question across takes and a wildly
 # different answer each time reads as instability on camera.
 TEMPERATURE = 0.3
 
+# Brevity is a product constraint, not a style preference: every token spent
+# here comes out of a quota the whole team shares, and the response renders in
+# a narrow panel beside three other people's. Stated in the imperative and
+# repeated, because a single polite "be brief" is reliably ignored the moment a
+# prompt looks like it wants code.
 SYSTEM_PROMPT = (
     "You are a shared team agent running inside HiveOS, a workspace where an "
-    "entire team draws on one pooled AI token budget. Answer in at most three "
-    "short sentences. Every token you spend comes out of the team's shared "
-    "quota, so be brief and concrete."
+    "entire team draws on one pooled AI token budget.\n"
+    "Rules, in order of importance:\n"
+    "1. Answer in at most three short sentences. Never exceed this.\n"
+    "2. Do not include code blocks, bullet lists, or headings. Prose only.\n"
+    "3. If a question invites a long answer, give the shortest useful one and "
+    "stop.\n"
+    "Every token you spend is drawn from the team's shared quota, so brevity "
+    "is the job, not a preference."
 )
 
 _key_cache = None
@@ -119,6 +135,11 @@ def complete(prompt, system):
         headers={
             "Authorization": f"Bearer {_api_key()}",
             "Content-Type": "application/json",
+            # Not decoration. The endpoint sits behind Cloudflare, which bans
+            # urllib's default `Python-urllib/3.13` signature outright and
+            # answers HTTP 403 `error code: 1010` — which looks exactly like a
+            # bad API key and is not one. Any honest UA gets through.
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )

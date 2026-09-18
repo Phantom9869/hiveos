@@ -22,3 +22,9 @@ capabilities = "CAPABILITY_IAM"
 resolve_s3 = true
 confirm_changeset = false
 fail_on_empty_changeset = false
+# Pinned here, not left to the template Default, because CloudFormation keeps a
+# deployed stack's existing parameter values on update — editing a `Default:`
+# changes nothing about a stack that already exists. The model name is not a
+# secret; the API key is a SecureString in SSM and is never passed as a
+# parameter. GroqKeyParam is the parameter *name* only.
+parameter_overrides = "GroqModel=openai/gpt-oss-120b GroqKeyParam=/hiveos/groq-api-key MaxTokensPerCall=400"
