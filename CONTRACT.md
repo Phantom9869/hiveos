@@ -15,7 +15,7 @@ Ranks 3rd in the source-of-truth hierarchy — above `PRD.md`, below deployed AW
 | DynamoDB table | `hiveos-state` |
 | SQS queue | `hiveos-agent-tasks` |
 | SQS dead-letter queue | `hiveos-agent-tasks-dlq` |
-| Team ID (hardcoded, MVP) | `alpha` |
+| Default team | `alpha` — teams are **not** hardcoded; this is only where a connection lands if it names none |
 | Agent slot IDs | `coder`, `researcher` |
 | Lambda architecture | `arm64` |
 | Lambda runtime | `python3.13` |
@@ -71,11 +71,111 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 
 | PK | SK | Attributes |
 |---|---|---|
-| `TEAM#alpha` | `METADATA` | `name`, `token_budget` (N), `tokens_used` (N), `created_at` |
-| `TEAM#alpha` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
-| `TEAM#alpha` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
-| `TEAM#alpha` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `connection_id`, `enqueued_at` |
-| `TEAM#alpha` | `MEMORY#<slug(key)>` | `key`, `val`, `updated_by`, `created_at` |
+| `TEAM#<team>` | `METADATA` | `name`, `token_budget` (N), `tokens_used` (N), `created_at` |
+| `TEAM#<team>` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
+| `TEAM#<team>` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
+| `TEAM#<team>` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `connection_id`, `enqueued_at` |
+| `TEAM#<team>` | `MEMORY#<slug(key)>` | `key`, `val`, `updated_by`, `created_at` |
+
+### Teams
+
+Every row above is partitioned by team, and every backend function takes the
+team as its first argument. Two people who type different workspace names get
+genuinely separate boards: separate budget, slots, queue, memory, ledger and
+broadcasts.
+
+**A team creates itself on first join** (`state.ensure_team`), with conditional
+writes so several people arriving at a new name in the same second cannot each
+reset it. Requiring `seed.sh` before a name worked would make isolation a
+deployment step rather than a property of the product.
+
+**Team names are untrusted input that ends up in a partition key**, so they are
+validated against `^[a-z0-9][a-z0-9_-]{0,30}$` and lowercased — anything else
+falls back to the default. Lowercasing matters: `Alpha` and `alpha` must be one
+room, not two that look identical and cannot see each other.
+
+| PK | SK | Attributes |
+|---|---|---|
+| `CONN#<connectionId>` | `TEAM` | `team`, `connected_at` |
+
+### Workspace passphrases
+
+A workspace is **open** unless the person who created it set a passphrase.
+Whoever creates it sets it; it is never changed afterwards by this code.
+
+| Field on METADATA | Meaning |
+|---|---|
+| `pass_salt` | 16 random bytes, hex. Absent on an open workspace |
+| `pass_hash` | PBKDF2-HMAC-SHA256, 100k iterations, hex |
+
+- **Verified on `$connect`, and refused with HTTP 403.** No socket and no
+  `CONN#` row ever exist for a failed attempt. Accepting the socket and closing
+  it after an error frame would leave a connected client with no team binding,
+  and a frame sent in that window resolves to the default workspace.
+- **Compared with `hmac.compare_digest`.** A plain `==` returns early on the
+  first differing byte, which leaks the matching prefix length to anyone
+  willing to time it.
+- **`state_snapshot` carries `protected` (a boolean) and never the salt or
+  hash.** The METADATA row is read wholesale to build the snapshot, so this is
+  the one place they could leak; the snapshot names the fields it sends.
+- **The passphrase travels in the `$connect` query string**, because a browser
+  cannot set headers on a WebSocket handshake. TLS covers it in transit. It
+  would appear in API Gateway access logs if those were enabled — they are not.
+  Recorded as a known tradeoff rather than left implicit.
+- **The default workspace stays open.** Zero-login on the public URL is a
+  deliberate property (`ARCHITECTURE.md` decision 9): a stranger has to be able
+  to open the board cold. `ws_smoke.py` asserts the open case as hard as the
+  closed one.
+
+### Workspace administration
+
+Whoever creates a workspace may also present an `admin_token`; its hash is
+stored the same way a passphrase's is. **There are no accounts, so rights hang
+off a secret the creator holds, not off a display name anyone could type.**
+Sharing that secret is what an invite is here.
+
+| Field on METADATA | Meaning |
+|---|---|
+| `admin_salt` / `admin_hash` | PBKDF2 of the admin token. Absent on a workspace with no owner |
+
+| Client action | Effect |
+|---|---|
+| `admin_set_budget` | `{token_budget}` — broadcasts `token_update` to the whole workspace |
+| `admin_rotate_passphrase` | `{passphrase}` — empty removes protection. Locks out the *next* joiner; everyone already connected stays |
+| `admin_delete_workspace` | Deletes every row the workspace owns, including its members' `CONN#/TEAM` index rows, then sends `workspace_deleted` |
+
+- **The token is minted by the client and never returned by the server.**
+  Whoever creates a workspace already holds it, so there is nothing to hand
+  back and no window in which it could be intercepted.
+- **Rights are decided once, at the handshake, and stored as `is_admin` on the
+  `CONN#` row.** Admin actions check the row, not the frame — the same rule
+  that makes `user_id` trustworthy. A client cannot grant itself rights by
+  adding a field to a message.
+- **`state_snapshot` carries `owned` and `is_admin` as booleans, never the salt
+  or hash.**
+- **`admin_delete_workspace` collects its audience before deleting.**
+  `broadcast_to_team` finds recipients by reading `CONN#` rows, which the
+  delete removes — broadcasting afterwards would reach nobody.
+
+PBKDF2 rather than argon2 or bcrypt because it is in the standard library —
+Lambda has neither without a layer, and a layer for one function costs more
+than it buys here. 100k iterations is ~50ms, paid once per handshake and never
+per frame.
+
+**The `CONN#…/TEAM` index is not redundant.** API Gateway exposes
+`queryStringParameters` on `$connect` and on nothing afterwards, so every later
+frame carries a connection ID and no team. Without this row, resolving a
+connection's team would mean scanning every team.
+
+The obvious alternative — have the client send its team on each frame — is
+rejected for exactly the reason `CONTRACT.md` already resolves the *sender*
+from the stored row rather than the frame: a value the client supplies is a
+value the client can forge, and forging this one would mean reading another
+team's board.
+
+It is deleted on `$disconnect` alongside the member row. An orphaned index row
+is harmless — it is only ever read by a connection ID that will never recur —
+but it is not cleaned up by `seed.sh`, which is a known MVP simplification.
 
 ### Entity rules
 

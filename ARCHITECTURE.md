@@ -164,7 +164,9 @@ Hackathon teams routinely lose two to three days to tilemaps, collision, and spr
 
 ### 9. No authentication for the MVP
 
-Cognito costs roughly a day of setup. The team is hardcoded to `TEAM#alpha` and members pick a name on entry. For a judge opening a URL cold, zero-login is actively better. This is an accepted, documented tradeoff — and the reason the server-side token ceiling is mandatory. Cognito is Post-Hackathon.
+Cognito costs roughly a day of setup, and it is still not built — it remains on the never-build list, because a judge who meets a sign-up form before seeing the board is a worse outcome than an unauthenticated demo.
+
+**Workspaces can be protected by a passphrase instead** (2026-09-18). Whoever creates one may set a passphrase; joining it then requires that passphrase, verified server-side at `$connect` against a PBKDF2 hash. This closes the actual gap — that anyone who knew a workspace *name* could walk into it — without putting a wall in front of the public URL, because a workspace with no passphrase stays open. It is authentication of the *workspace*, not of the person: there are still no accounts and no identity, and members pick a display name on entry. For a judge opening a URL cold, zero-login is actively better. This is an accepted, documented tradeoff — and the reason the server-side token ceiling is mandatory. Cognito is Post-Hackathon.
 
 ### 10. Infrastructure as a SAM template
 
@@ -176,7 +178,7 @@ All stack resources live in `template.yaml`. CloudFormation owns the inventory, 
 
 | Simplification | Real-world version |
 |---|---|
-| Single hardcoded team | Multi-tenant with team creation |
+| ~~Single hardcoded team~~ — **built 2026-09-18**: every row is team-partitioned and teams self-bootstrap on first join | Team *administration* — ownership, invites, renaming, deletion |
 | No authentication | Cognito user pools |
 | Fixed 2 agent slots | Configurable per-team capacity |
 | FIFO only | Priority queues, fair-share scheduling |

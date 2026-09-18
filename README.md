@@ -14,7 +14,9 @@ Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 
 ## What it does
 
-- One team shares a **token budget** and a pool of **agent slots**
+- Each **workspace** is fully isolated — its own budget, slots, queue, memory and ledger,
+  and can be **passphrase-protected**, with an owner who can set the budget or delete it
+- A team shares a **token budget** and a pool of **agent slots**
 - The budget meter is **identical on every member's screen** and updates live
 - When all slots are busy, further requests **queue** with a real position
 - A freed slot **auto-dispatches** the next queued task
@@ -22,7 +24,7 @@ Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 - The budget is an **enforced ceiling**, not a gauge — the server refuses to spend past it
 - A shared **workspace floor** shows who is present and who is mid-task, live on every screen
 
-**Status.** Everything above is live, deployed and verified against real AWS — 61/61 end-to-end
+**Status.** Everything above is live, deployed and verified against real AWS — 79/79 end-to-end
 checks (`scripts/ws_smoke.py`) and the full demo sequence 12/12 twice unattended
 (`scripts/rehearse.py`). The agent is real and the token counts are the provider's reported
 usage, not estimates.
@@ -138,7 +140,7 @@ Verify the deployed backend actually behaves — two live clients, fan-out, and 
 ```bash
 pip install websockets
 ./scripts/reset-demo.sh               # clean board, SQS drained, Lambdas warm — and verified
-python scripts/ws_smoke.py            # 61 checks: backbone, scheduler, memory, ceiling, avatars, fairness
+python scripts/ws_smoke.py            # 79 checks: backbone, scheduler, memory, ceiling, avatars, fairness, isolation, passphrases, admin
 python scripts/rehearse.py --takes 2  # the recorded demo sequence, 12 checks, unattended
 ```
 
@@ -175,8 +177,10 @@ template.yaml      SAM — all AWS infrastructure
 
 **Built and deployed:** shared token meter · agent slots · **fair queueing** with live position · auto-dispatch · shared team memory via **model-invoked tools** · **per-person spend ledger** · enforced budget ceiling · pixel workspace floor · team chat · public URL.
 
-**Not built:** per-team isolation (one hardcoded team), authentication, and any retention policy
-on the task ledger. See `PRD.md` and `ARCHITECTURE.md` for what was deliberately excluded.
+**Not built:** user accounts. Workspaces can be passphrase-protected and have an owner, but
+there is no identity behind a display name — administration hangs off a secret the creator
+holds, not off who anyone claims to be. Also unbuilt: any retention policy on the task ledger.
+See `PRD.md` and `ARCHITECTURE.md` for what was deliberately excluded.
 
 **Deliberately excluded:** authentication, multiple teams, game-engine graphics, token-level preemption, calendar/email integrations. See `PRD.md` and `ARCHITECTURE.md` for why.
 

@@ -52,7 +52,7 @@ def _is_conditional_failure(error):
 # --- Slots -----------------------------------------------------------------
 
 
-def try_claim(slot_id, user_id):
+def try_claim(team, slot_id, user_id):
     """Atomically take one slot. False means somebody else already had it.
 
     The ConditionExpression is the whole point: this is the only correct way
@@ -61,7 +61,7 @@ def try_claim(slot_id, user_id):
     """
     try:
         state.table().update_item(
-            Key={"PK": state.TEAM_PK, "SK": f"AGENT#{slot_id}"},
+            Key={"PK": state.team_pk(team), "SK": f"AGENT#{slot_id}"},
             UpdateExpression="SET #s = :busy, #u = :user, claimed_at = :now",
             ConditionExpression="#s = :idle",
             ExpressionAttributeNames={"#s": "status", "#u": "current_user"},
@@ -79,7 +79,7 @@ def try_claim(slot_id, user_id):
         raise
 
 
-def claim_any(preferred, user_id):
+def claim_any(team, preferred, user_id):
     """Claim the requested slot, else any other. None if all are busy."""
     order = list(SLOTS)
     if preferred in order:
@@ -87,7 +87,7 @@ def claim_any(preferred, user_id):
         order.insert(0, preferred)
 
     for slot_id in order:
-        if try_claim(slot_id, user_id):
+        if try_claim(team, slot_id, user_id):
             print(f"[scheduler] claimed slot={slot_id} user={user_id}")
             return slot_id
 
@@ -95,9 +95,9 @@ def claim_any(preferred, user_id):
     return None
 
 
-def set_idle(slot_id, expected_holder):
+def set_idle(team, slot_id, expected_holder):
     state.table().update_item(
-        Key={"PK": state.TEAM_PK, "SK": f"AGENT#{slot_id}"},
+        Key={"PK": state.team_pk(team), "SK": f"AGENT#{slot_id}"},
         UpdateExpression="SET #s = :idle, #u = :null REMOVE claimed_at",
         ConditionExpression="#u = :expected_holder",
         ExpressionAttributeNames={
@@ -116,12 +116,12 @@ def set_idle(slot_id, expected_holder):
 # --- Queue -----------------------------------------------------------------
 
 
-def enqueue(user_id, agent_type, prompt, connection_id):
+def enqueue(team, user_id, agent_type, prompt, connection_id):
     """Park a task in DynamoDB and return its SK."""
     sk = f"QUEUE#{state.now_iso_micros()}#{uuid.uuid4().hex[:8]}"
     state.table().put_item(
         Item={
-            "PK": state.TEAM_PK,
+            "PK": state.team_pk(team),
             "SK": sk,
             "user_id": user_id,
             "agent_type": agent_type,
@@ -134,7 +134,7 @@ def enqueue(user_id, agent_type, prompt, connection_id):
     return sk
 
 
-def take_next_task():
+def take_next_task(team):
     """Claim ownership of the next waiting task, or None if none wait.
 
     "Next" is `state.fair_order` — least-recently-served first, arrival only as
@@ -146,10 +146,10 @@ def take_next_task():
     finishing at the same moment both see the same head-of-queue item; only
     one can delete it, and the loser simply moves to the next one.
     """
-    for item in state.queue_items():
+    for item in state.queue_items(team):
         try:
             state.table().delete_item(
-                Key={"PK": state.TEAM_PK, "SK": item["SK"]},
+                Key={"PK": state.team_pk(team), "SK": item["SK"]},
                 ConditionExpression="attribute_exists(SK)",
             )
             return item
@@ -161,7 +161,7 @@ def take_next_task():
     return None
 
 
-def requeue(item):
+def requeue(team, item):
     """Put a task back at its original position.
 
     Only used when we won a task but then lost the slot race. Re-writing the
@@ -175,13 +175,13 @@ def requeue(item):
 # --- Dispatch --------------------------------------------------------------
 
 
-def dispatch(slot_id, user_id, agent_type, prompt, connection_id):
+def dispatch(team, slot_id, user_id, agent_type, prompt, connection_id):
     """Hand a running task to SQS. Format is CONTRACT.md's."""
     sqs().send_message(
         QueueUrl=os.environ["QUEUE_URL"],
         MessageBody=json.dumps(
             {
-                "team_id": state.TEAM_ID,
+                "team_id": state.clean_team(team),
                 "slot_id": slot_id,
                 "user_id": user_id,
                 "agent_type": agent_type,
@@ -197,8 +197,9 @@ def dispatch(slot_id, user_id, agent_type, prompt, connection_id):
 # --- Broadcasts ------------------------------------------------------------
 
 
-def broadcast_slot(slot_id, status, current_user):
+def broadcast_slot(team, slot_id, status, current_user):
     broadcast.broadcast_to_team(
+        team,
         {
             "event": "agent_state_update",
             "agent_type": slot_id,
@@ -209,14 +210,15 @@ def broadcast_slot(slot_id, status, current_user):
     )
 
 
-def broadcast_queue():
+def broadcast_queue(team):
     """Tell every waiting user where they now stand.
 
     Sent to the whole team rather than directed at one connection: a user can
     have several tabs open, and the frontend filters on user_id anyway.
     """
-    for entry in state.queue_view():
+    for entry in state.queue_view(team):
         broadcast.broadcast_to_team(
+            team,
             {
                 "event": "queue_update",
                 "user_id": entry["user_id"],
@@ -230,37 +232,38 @@ def broadcast_queue():
 # --- The release path ------------------------------------------------------
 
 
-def release_and_dispatch(slot_id, expected_holder):
+def release_and_dispatch(team,slot_id, expected_holder):
     """Free a slot, then start the next waiting task. Returns the slot used.
 
     This runs in the Agent Runner's finally block, so it must work even when
     the task it follows blew up. A slot that leaks here deadlocks the demo.
     """
-    set_idle(slot_id, expected_holder)
-    broadcast_slot(slot_id, "IDLE", None)
+    set_idle(team, slot_id, expected_holder)
+    broadcast_slot(team, slot_id, "IDLE", None)
 
-    task = take_next_task()
+    task = take_next_task(team)
     if task is None:
         return None
 
-    claimed = claim_any(task.get("agent_type"), task["user_id"])
+    claimed = claim_any(team, task.get("agent_type"), task["user_id"])
     if claimed is None:
         # Someone claimed the slot we just freed in the gap between the two
         # operations. Put the task back where it was and let whoever finishes
         # next pick it up.
-        requeue(task)
-        broadcast_queue()
+        requeue(team, task)
+        broadcast_queue(team)
         return None
 
     # Same ordering rule as claim_agent: the BUSY frame must reach clients
     # before the task that could complete and release the slot.
-    broadcast_slot(claimed, "BUSY", task["user_id"])
+    broadcast_slot(team, claimed, "BUSY", task["user_id"])
     dispatch(
+        team,
         claimed,
         task["user_id"],
         task.get("agent_type"),
         task.get("prompt", ""),
         task.get("connection_id"),
     )
-    broadcast_queue()
+    broadcast_queue(team)
     return claimed

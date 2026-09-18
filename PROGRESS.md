@@ -40,6 +40,9 @@
 | 5 | Agent chat + 2D canvas (cuttable) | `COMPLETE` — **un-cut** by user decision, 2026-09-18 |
 | 7 | Canvas-first pixel workspace | `COMPLETE` — merged, deployed, rehearsed 2026-09-18 |
 | 8 | Depth pass — identity, full screen, ledger, fairness, tools | `COMPLETE` — 2026-09-18 |
+| 9 | Per-team isolation | `COMPLETE` — 2026-09-18 |
+| 10 | Workspace passphrases | `COMPLETE` — 2026-09-18 |
+| 11 | Workspace administration | `COMPLETE` — 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
@@ -64,6 +67,158 @@ the only place the agent differs in *kind* from the Phase 3 design.
 ---
 
 ## Completed
+
+**Phase 11 — 2026-09-18 — workspace administration**
+
+**The blocker was named before building: you cannot have owners without
+identities.** A display name is something anyone can type at the gate, so an
+owner identified by name would be enforceable in the UI and nowhere else.
+Administration therefore hangs off a secret the creator holds. Sharing that
+secret is what an invite is here — the honest mechanism available without
+accounts, and saying so beats pretending otherwise.
+
+Three actions, the ones a governance product actually needs: set the budget,
+rotate the passphrase, delete the workspace.
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **79/79** (seven new admin checks) |
+| `rehearse.py --takes 2` | ✅ 12/12 twice, default **and** private workspace |
+| Creator becomes administrator | ✅ |
+| Ordinary member | ✅ not an administrator |
+| Forged admin token | ✅ grants nothing |
+| **Server refuses a member's privileged action** | ✅ not the UI hiding it |
+| Owner sets budget | ✅ 4242, seen by every member |
+| Delete | ✅ every row gone, members told |
+| Admin salt/hash reaching a client | ✅ never |
+
+**Decisions worth keeping:**
+
+- **The token is minted by the client, never returned by the server.** Whoever
+  creates a workspace already holds it, so there is nothing to hand back and no
+  window in which it could be intercepted.
+- **Rights are decided at the handshake and stored as `is_admin` on the `CONN#`
+  row.** Admin frames check the row, not the message — the same rule that makes
+  `user_id` trustworthy.
+- **`admin_delete_workspace` collects its audience before deleting**, because
+  `broadcast_to_team` finds recipients by reading the `CONN#` rows the delete
+  removes. Caught while writing it, not after.
+
+**A stranger walked into a rehearsal, and that turned out to matter.** The
+public URL has real visitors now — `Kamal` appeared in a member list a take was
+asserting on. Two real bugs surfaced from chasing it, both introduced by team
+isolation and both invisible until a second workspace existed:
+
+1. `reset-demo.sh` seeded the workspace it was told to and then **verified a
+   different one** — its probe connected without a team, landing in the
+   default. It reported another board's tokens and members as though they were
+   yours.
+2. `rehearse.py` read `TEAM#alpha` straight from DynamoDB while driving a
+   different workspace over the socket, so it compared one board's row against
+   another board's snapshot.
+
+Both are the same shape: a team-aware write paired with a team-blind read.
+`DEMO_TEAM` and `DEMO_PASSPHRASE` now steer both scripts, and `DEMO.md` says to
+record in a protected workspace — which is the actual fix for strangers on the
+public URL.
+
+**Phase 10 — 2026-09-18 — workspace passphrases (not Cognito)**
+
+User asked for authentication. Cognito is on `CLAUDE.md`'s **never-build** list
+— not a deferral like "multiple teams" was, but an explicit considered-and-
+rejected — so this was raised before building rather than after. The recorded
+reason still holds and is the important one: *"for a judge opening a URL cold,
+zero-login is actively better."* A login wall in front of the public URL costs
+the submission more than it protects.
+
+**Built instead, on the user's choice: a passphrase per workspace.** Whoever
+creates one may set a passphrase; joining it afterwards requires it. That
+closes the actual gap — anyone who knew a workspace *name* could walk into it —
+without touching the property that makes the demo work, because a workspace
+with no passphrase stays open.
+
+This is authentication of the **workspace**, not of the person. There are still
+no accounts and no identity behind a display name. Said plainly in
+`ARCHITECTURE.md` decision 9 rather than implied.
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **72/72** (six new passphrase checks) |
+| `rehearse.py --takes 2` | ✅ 12/12, twice |
+| Wrong passphrase | ✅ refused at the handshake, no socket |
+| No passphrase on a protected workspace | ✅ refused |
+| Right passphrase | ✅ joined |
+| Salt and hash reaching a client | ✅ never — snapshot sends `protected` only |
+| **Open workspace still opens cold** | ✅ asserted as hard as the closed case |
+
+**Decisions worth keeping:**
+
+- **Refused at `$connect` with 403**, so no socket and no `CONN#` row exist for
+  a failed attempt. Accepting and closing after an error frame would leave a
+  connected client with no team binding, and a frame sent in that window
+  resolves to the *default* workspace.
+- **`hmac.compare_digest`**, because `==` returns early on the first differing
+  byte and leaks the matching prefix length to anyone willing to time it.
+- **PBKDF2-HMAC-SHA256, 100k iterations** — in the standard library, where
+  argon2 and bcrypt would need a Lambda layer. ~50ms, paid once per handshake,
+  never per frame, so it does not touch the latency the demo is measured on.
+- **The client cannot read a 403.** A browser surfaces a refused WebSocket
+  handshake as an ordinary close with no readable status, so `useHive` infers
+  it: a socket that never opened, twice running, is a refusal rather than a
+  blip, and it stops retrying and says so instead of spinning silently.
+
+**Known tradeoff, recorded not hidden:** the passphrase travels in the
+`$connect` query string, because a browser cannot set headers on a WebSocket
+handshake. TLS covers it in transit; it would appear in API Gateway access logs
+if those were ever enabled, which they are not.
+
+**Phase 9 — 2026-09-18 — per-team isolation**
+
+A documented deferral, reversed on user decision. `PRD.md` listed "multiple
+teams" as won't-build and `ARCHITECTURE.md` had "single hardcoded team" under
+intentionally-simplified; both are updated rather than left contradicting the
+code. (`CLAUDE.md`'s never-build list bans multi-team *analytics*, which this
+is not.)
+
+Every row is partitioned by team and every backend function takes the team as
+its first argument. Two people typing different workspace names get genuinely
+separate boards, and a new team creates itself on first join — requiring a
+seeding script would have made isolation a deployment step rather than a
+property of the product.
+
+**The awkward bit was routing.** API Gateway exposes `queryStringParameters` on
+`$connect` and nothing after it, so every later frame carries a connection ID
+and no team. Resolved with a `CONN#<id>/TEAM` index row outside the team
+partitions. The obvious alternative — have the client send its team per frame —
+was rejected for the same reason `CONTRACT.md` already resolves the *sender*
+from the stored row: a value the client supplies is a value it can forge, and
+forging this one means reading another team's board.
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **66/66** (five new isolation checks) |
+| `rehearse.py --takes 2` | ✅ 12/12, twice |
+| Member lists isolated | ✅ alpha=['alice'] acme=['zara'] |
+| New team self-bootstraps | ✅ budget and 2 slots on first join |
+| Agent activity never crosses | ✅ nothing reached alpha while acme ran a task |
+| Spend and memory isolated | ✅ alpha 0 tokens / 0 facts while acme spent 775 |
+
+**Two bugs, both from mechanical edits rather than design:**
+
+1. `fair_order` read `team` without taking it — a `NameError` that only fired
+   on the enqueue path. My first static check verified every *caller* passed
+   team and never checked the *callee* accepted it; an AST pass comparing
+   parameters against names read in the body caught it.
+2. A blind string replacement inserted `team,` twice into `broadcast_queue`,
+   so the payload argument received the string `"team"`. Two overlapping
+   indentation patterns matched the same site.
+
+Both are the same lesson: a 17-call-site mechanical refactor needs a checker
+that reads the code, not a regex that reads lines.
+
+**Known simplification:** orphaned `CONN#…/TEAM` index rows are not cleaned up
+by `seed.sh`. Harmless — each is only ever read by a connection ID that will
+never recur — but they accumulate.
 
 **Phase 8 — 2026-09-18 — identity, full screen, the ledger, fairness, and tools**
 

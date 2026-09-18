@@ -227,6 +227,13 @@ body {
   color: var(--honey);
 }
 
+.lamp--refused .lamp__dot {
+  background: var(--alarm);
+}
+.lamp--refused {
+  color: var(--alarm);
+}
+
 .lamp--closed .lamp__dot {
   background: var(--alarm);
 }
@@ -753,6 +760,20 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.gate__optional {
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  text-transform: none;
+}
+
+.gate__hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--faint);
 }
 
 .gate__legend {
@@ -1495,6 +1516,35 @@ body {
 
 .member--queued .member__state {
   color: var(--honey);
+}
+
+/* --- Workspace admin ------------------------------------------------------ */
+
+.admin__row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.admin__row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin__note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* Destructive, and it looks it. The only irreversible action in the product. */
+.btn--danger {
+  border-color: rgba(255, 92, 77, 0.45);
+  color: var(--alarm);
+}
+
+.btn--danger:hover {
+  background: rgba(255, 92, 77, 0.1);
 }
 
 /* --- Team chat ------------------------------------------------------------ */

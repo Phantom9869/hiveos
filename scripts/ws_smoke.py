@@ -9,7 +9,7 @@ Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
 slots claimed, a third claim queued with a real position, auto-dispatch when a
 slot frees, and no slot leak when a task fails. Sections 13-18 cover shared
 memory, token accounting, and the enforced budget ceiling. 19 covers avatar
-presence and movement; 20 covers fair queueing — that dispatch order follows
+presence and movement; 21 covers team isolation; 22 covers workspace passphrases; 23 covers administration; 20 covers fair queueing — that dispatch order follows
 who has waited longest rather than who arrived first, and that the position
 shown on the board is the one actually dispatched.
 
@@ -36,6 +36,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import urllib.parse
 
 import websockets
 
@@ -737,7 +738,251 @@ async def run_memory_and_budget(url):
 
     await run_avatars(url)
     await run_fairness(url)
+    await run_isolation(url)
+    await run_passphrase(url)
+    await run_admin(url)
 
+
+
+
+
+# A fixed name and passphrase, so this is idempotent: the first run creates the
+# workspace, every later run verifies against what it created.
+VAULT_TEAM = "smoke-vault"
+VAULT_PASS = "correct horse battery staple"
+
+
+async def _join(url, user, team, passphrase=None):
+    """Try to open a socket and read a snapshot. Returns (snapshot | None)."""
+    query = f"user_id={user}&team={team}"
+    if passphrase is not None:
+        query += f"&passphrase={urllib.parse.quote(passphrase)}"
+    try:
+        ws = await websockets.connect(f"{url}?{query}")
+    except Exception:
+        # API Gateway answers a refused $connect with 403, which the client
+        # library raises during the handshake. There is no status code a
+        # browser could read here either — see useHive's `refused` state.
+        return None
+    try:
+        await ws.send(json.dumps({"action": "hello"}))
+        return await expect(ws, "state_snapshot", user)
+    finally:
+        await ws.close()
+
+
+
+# Created and deleted within the section, so it leaves nothing behind.
+ADMIN_TEAM = "smoke-admin"
+ADMIN_TOKEN = "smoke-owner-token-do-not-reuse"
+
+
+async def run_admin(url):
+    """Section 23: administration is enforced on the server.
+
+    The point of these checks is not that the buttons work — it is that hiding
+    them is *not* the control. A workspace with no accounts has no "who", so
+    rights hang off a secret the creator holds, and the server has to refuse a
+    frame from anyone who does not hold it. Every negative case below is a
+    client that asked politely and was told no.
+    """
+    print("\n23. Workspace administration — the Phase 11 gate")
+
+    owner = await websockets.connect(
+        f"{url}?user_id=owner&team={ADMIN_TEAM}"
+        f"&admin_token={urllib.parse.quote(ADMIN_TOKEN)}"
+    )
+    await owner.send(json.dumps({"action": "hello"}))
+    created = await expect(owner, "state_snapshot", "owner")
+    check(
+        "whoever creates a workspace administers it",
+        created.get("is_admin") is True and created.get("owned") is True,
+        f"is_admin={created.get('is_admin')} owned={created.get('owned')}",
+    )
+    check(
+        "**the admin salt and hash never reach a client**",
+        "admin_hash" not in json.dumps(created)
+        and "admin_salt" not in json.dumps(created),
+        "neither field present in state_snapshot",
+    )
+
+    member = await websockets.connect(f"{url}?user_id=member&team={ADMIN_TEAM}")
+    await member.send(json.dumps({"action": "hello"}))
+    plain = await expect(member, "state_snapshot", "member")
+    check(
+        "an ordinary member is not an administrator",
+        plain.get("is_admin") is False,
+        f"is_admin={plain.get('is_admin')}",
+    )
+
+    forger = await websockets.connect(
+        f"{url}?user_id=forger&team={ADMIN_TEAM}&admin_token=not-the-real-token"
+    )
+    await forger.send(json.dumps({"action": "hello"}))
+    forged = await expect(forger, "state_snapshot", "forger")
+    check(
+        "**a wrong admin token grants nothing**",
+        forged.get("is_admin") is False,
+        f"is_admin={forged.get('is_admin')}",
+    )
+
+    await drain(member)
+    await member.send(json.dumps({
+        "action": "admin_set_budget", "token_budget": 999999,
+    }))
+    refused = await expect(member, "error", "member")
+    check(
+        "**the server refuses a privileged action from a member — not the UI**",
+        "admin token" in (refused.get("message") or ""),
+        refused.get("message"),
+    )
+
+    await drain(member)
+    await owner.send(json.dumps({"action": "admin_set_budget", "token_budget": 4242}))
+    changed = await expect(member, "token_update", "member",
+                           where=lambda f: f.get("token_budget") == 4242)
+    check(
+        "the owner sets the budget and the whole workspace sees it",
+        changed.get("token_budget") == 4242,
+        f"budget={changed.get('token_budget')} seen by a member",
+    )
+
+    await owner.send(json.dumps({"action": "admin_delete_workspace"}))
+    gone = await expect(member, "workspace_deleted", "member")
+    check(
+        "deleting a workspace tells the people standing in it",
+        gone.get("team") == ADMIN_TEAM,
+        f"team={gone.get('team')}",
+    )
+
+    for ws in (owner, member, forger):
+        await ws.close()
+    await asyncio.sleep(3)
+
+
+async def run_passphrase(url):
+    """Section 22: a protected workspace admits only the passphrase.
+
+    The open case is asserted as hard as the closed one. Zero-login on the
+    public URL is a deliberate property — a stranger has to be able to open the
+    board cold — and an over-eager auth change would take it away silently.
+    """
+    print("\n22. Workspace passphrases — the Phase 10 gate")
+
+    created = await _join(url, "founder", VAULT_TEAM, VAULT_PASS)
+    check(
+        "a workspace created with a passphrase reports itself protected",
+        created is not None and created.get("protected") is True,
+        f"protected={created and created.get('protected')}",
+    )
+    check(
+        "**the salt and hash never reach a client**",
+        created is not None
+        and "pass_hash" not in json.dumps(created)
+        and "pass_salt" not in json.dumps(created),
+        "neither field present in state_snapshot",
+    )
+
+    await asyncio.sleep(1)
+    check(
+        "**a wrong passphrase is refused at the handshake**",
+        await _join(url, "stranger", VAULT_TEAM, "not the passphrase") is None,
+        "no socket opened",
+    )
+    check(
+        "**no passphrase at all is refused**",
+        await _join(url, "stranger", VAULT_TEAM) is None,
+        "no socket opened",
+    )
+    check(
+        "the right passphrase gets in",
+        await _join(url, "teammate", VAULT_TEAM, VAULT_PASS) is not None,
+        "joined",
+    )
+
+    open_board = await _join(url, "judge", "alpha")
+    check(
+        "**an open workspace still opens cold — zero-login survives**",
+        open_board is not None and open_board.get("protected") is False,
+        f"joined, protected={open_board and open_board.get('protected')}",
+    )
+    await asyncio.sleep(3)
+
+
+async def run_isolation(url):
+    """Section 21: two teams cannot see each other.
+
+    Isolation is the one property that cannot be demonstrated from inside a
+    single team, and the one where a regression is silent — everything would
+    keep working, just for everybody at once. A leak here is a data breach
+    rather than a bug, so it is asserted from both directions: nothing of
+    acme's reaches alpha, and nothing of alpha's reaches acme.
+    """
+    print("\n21. Two teams cannot see each other — the Phase 9 gate")
+    alice = await websockets.connect(f"{url}?user_id=alice&team=alpha")
+    zara = await websockets.connect(f"{url}?user_id=zara&team=acme")
+    await asyncio.sleep(1.5)
+    for ws in (alice, zara):
+        await drain(ws)
+        await ws.send(json.dumps({"action": "hello"}))
+
+    alpha = await expect(alice, "state_snapshot", "alice")
+    acme = await expect(zara, "state_snapshot", "zara")
+
+    check(
+        "each side is told which workspace it is in",
+        (alpha.get("team"), acme.get("team")) == ("alpha", "acme"),
+        f"{alpha.get('team')} / {acme.get('team')}",
+    )
+    check(
+        "**neither team's member list contains the other's people**",
+        "zara" not in {m["user_id"] for m in alpha.get("members", [])}
+        and "alice" not in {m["user_id"] for m in acme.get("members", [])},
+        f"alpha={sorted(m['user_id'] for m in alpha.get('members', []))} "
+        f"acme={sorted(m['user_id'] for m in acme.get('members', []))}",
+    )
+    check(
+        "a brand-new team bootstrapped its own budget and slots",
+        acme.get("token_budget", 0) > 0 and len(acme.get("agents", [])) == 2,
+        f"budget={acme.get('token_budget')} slots={len(acme.get('agents', []))}",
+    )
+
+    # Real work in acme, watched from alpha.
+    await drain(alice)
+    await zara.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder",
+        "prompt": "remember: office = Berlin",
+    }))
+    await expect(zara, "agent_response", "zara",
+                 where=lambda f: f.get("user_id") == "zara", timeout=60)
+
+    leaked = []
+    try:
+        while True:
+            raw = await asyncio.wait_for(alice.recv(), 2)
+            event = json.loads(raw).get("event")
+            if event in {"agent_state_update", "token_update", "agent_response",
+                         "memory_updated", "queue_update"}:
+                leaked.append(event)
+    except (asyncio.TimeoutError, TimeoutError):
+        pass
+    check(
+        "**acme's agent activity never reaches alpha**",
+        not leaked,
+        f"leaked {sorted(set(leaked))}" if leaked else "nothing crossed",
+    )
+
+    await alice.send(json.dumps({"action": "hello"}))
+    after = await expect(alice, "state_snapshot", "alice")
+    check(
+        "**acme's spend and memory stay out of alpha's board**",
+        after.get("tokens_used") == 0 and not after.get("memory"),
+        f"alpha tokens={after.get('tokens_used')} facts={len(after.get('memory') or [])}",
+    )
+
+    for ws in (alice, zara):
+        await ws.close()
+    await asyncio.sleep(3)
 
 
 async def run_fairness(url):
