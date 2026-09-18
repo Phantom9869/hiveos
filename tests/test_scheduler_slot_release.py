@@ -10,7 +10,7 @@ performed no ownership check, so any connected client could release any slot.
 
 After the fix
 -------------
-- set_idle(slot_id, expected_holder) adds a ConditionExpression that makes
+- set_idle(team, slot_id, expected_holder) adds a ConditionExpression that makes
   DynamoDB raise ConditionalCheckFailedException when the slot is no longer
   held by expected_holder.
 - _release_agent reads the slot and connection records and rejects callers
@@ -77,7 +77,7 @@ class TestSetIdle:
             mock_table.update_item.return_value = {}
 
             from backend.shared import scheduler
-            scheduler.set_idle("coder", expected_holder="user_A")
+            scheduler.set_idle("alpha", "coder", expected_holder="user_A")
 
             _, kwargs = mock_table.update_item.call_args
             values = kwargs.get("ExpressionAttributeValues", {})
@@ -98,7 +98,7 @@ class TestSetIdle:
 
             from backend.shared import scheduler
             with pytest.raises(ClientError) as exc_info:
-                scheduler.set_idle("coder", expected_holder="user_A")
+                scheduler.set_idle("alpha", "coder", expected_holder="user_A")
 
             assert exc_info.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
             assert mock_table.update_item.call_count == 1, "Must not retry after condition failure"
@@ -118,7 +118,7 @@ class TestSetIdle:
 
             from backend.shared import scheduler
             with pytest.raises(ClientError):
-                scheduler.set_idle("coder", expected_holder="user_A")
+                scheduler.set_idle("alpha", "coder", expected_holder="user_A")
 
             # Confirm only one attempt was made — no silent fallback.
             assert mock_table.update_item.call_count == 1
@@ -157,7 +157,7 @@ class TestReleaseAgent:
              patch("backend.shared.broadcast.send_to_connection"):
 
             from backend.router import app as router
-            router._release_agent("conn-user-B", {"agent_type": "coder"})
+            router._release_agent("alpha", "conn-user-B", {"agent_type": "coder"})
 
             mock_release.assert_not_called()
 
@@ -171,7 +171,7 @@ class TestReleaseAgent:
              patch("backend.shared.scheduler.release_and_dispatch") as mock_release:
 
             from backend.router import app as router
-            router._release_agent("conn-user-A", {"agent_type": "coder"})
+            router._release_agent("alpha", "conn-user-A", {"agent_type": "coder"})
 
             mock_release.assert_called_once()
 
@@ -186,7 +186,7 @@ class TestReleaseAgent:
              patch("backend.shared.scheduler.release_and_dispatch"):
 
             from backend.router import app as router
-            router._release_agent("conn-user-A", {"agent_type": "coder"})
+            router._release_agent("alpha", "conn-user-A", {"agent_type": "coder"})
 
             # get_item must have been called at least twice:
             # once for the connection record, once for the slot record.
