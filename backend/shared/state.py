@@ -140,7 +140,7 @@ def spawn_point(connection_id):
     }
 
 
-def add_connection(team, connection_id, user_id, avatar):
+def add_connection(team, connection_id, user_id, avatar, is_admin=False):
     member = {
         "user_id": user_id,
         "avatar": avatar,
@@ -151,6 +151,9 @@ def add_connection(team, connection_id, user_id, avatar):
             "PK": team_pk(team),
             "SK": f"CONN#{connection_id}",
             "connected_at": now_iso(),
+            # Settled at the handshake, like the team itself. Every later
+            # admin action reads it from here rather than re-checking a token.
+            "is_admin": is_admin,
             **member,
         }
     )
@@ -253,10 +256,111 @@ def passphrase_ok(team, passphrase):
     return hmac.compare_digest(_derive(passphrase, salt), stored)
 
 
+
+# --- Workspace administration ----------------------------------------------
+
+# There are no accounts, so there is no "who". Administration is therefore
+# keyed on a *secret the creator holds*, not on a name anyone could type at the
+# gate — an owner identified by display name would be enforceable only in the
+# UI, which is to say not enforceable.
+#
+# Sharing that secret is what an invite is here. Deliberate: it is the honest
+# mechanism available without identity, and pretending otherwise would be
+# worse than saying so.
+
+
+def _team_admin_hash(team):
+    response = table().get_item(
+        Key={"PK": team_pk(team), "SK": "METADATA"},
+        ProjectionExpression="admin_salt, admin_hash",
+    )
+    item = response.get("Item") or {}
+    return item.get("admin_salt"), item.get("admin_hash")
+
+
+def admin_token_ok(team, token):
+    """Does this token hold administrative rights over this workspace?
+
+    False for a workspace that has no admin hash at all. A workspace created
+    before this existed — or seeded by `seed.sh` — simply has no administrator,
+    which is safer than treating "no owner recorded" as "everyone is owner".
+    """
+    salt, stored = _team_admin_hash(team)
+    if not stored or not token:
+        return False
+    return hmac.compare_digest(_derive(token, salt), stored)
+
+
+def set_budget(team, budget):
+    """Set a workspace's ceiling. Returns the new (used, budget)."""
+    item = table().update_item(
+        Key={"PK": team_pk(team), "SK": "METADATA"},
+        UpdateExpression="SET token_budget = :b",
+        ExpressionAttributeValues={":b": int(budget)},
+        ReturnValues="ALL_NEW",
+    )["Attributes"]
+    return int(item.get("tokens_used", 0)), int(item.get("token_budget", 0))
+
+
+def rotate_passphrase(team, passphrase):
+    """Replace a workspace's passphrase, or remove it if given nothing.
+
+    Removing is a real operation, not an oversight: a workspace that was
+    protected for a demo should be able to become open again without being
+    deleted and recreated.
+    """
+    if passphrase:
+        salt = secrets.token_hex(16)
+        table().update_item(
+            Key={"PK": team_pk(team), "SK": "METADATA"},
+            UpdateExpression="SET pass_salt = :s, pass_hash = :h",
+            ExpressionAttributeValues={":s": salt, ":h": _derive(passphrase, salt)},
+        )
+    else:
+        table().update_item(
+            Key={"PK": team_pk(team), "SK": "METADATA"},
+            UpdateExpression="REMOVE pass_salt, pass_hash",
+        )
+
+
+def delete_team(team):
+    """Remove every row a workspace owns. Returns how many were deleted.
+
+    Includes the CONN#/TEAM index rows for its live members, which live outside
+    the partition — missing those would leave connections pointing at a
+    workspace that no longer exists.
+    """
+    pk = team_pk(team)
+    rows = query_team(team)
+    with table().batch_writer() as batch:
+        for item in rows:
+            batch.delete_item(Key={"PK": pk, "SK": item["SK"]})
+            if item["SK"].startswith("CONN#"):
+                batch.delete_item(
+                    Key={"PK": f"CONN#{item['SK'].split('#', 1)[1]}", "SK": "TEAM"}
+                )
+    return len(rows)
+
+
+def connection_is_admin(team, connection_id):
+    """Was this connection admitted as an administrator?
+
+    Decided once, at the handshake, and stored on the CONN# row — the same
+    shape as every other thing the server trusts about a connection. An admin
+    action that re-presented the token per frame would be a token travelling
+    over the wire repeatedly for no gain.
+    """
+    response = table().get_item(
+        Key={"PK": team_pk(team), "SK": f"CONN#{connection_id}"},
+        ProjectionExpression="is_admin",
+    )
+    return bool((response.get("Item") or {}).get("is_admin"))
+
+
 # --- Connection ownership --------------------------------------------------
 
 
-def ensure_team(team, passphrase=None):
+def ensure_team(team, passphrase=None, admin_token=None):
     """Create a team's METADATA and slot rows if this is its first member.
 
     Teams bootstrap themselves. Requiring `seed.sh` before a name worked would
@@ -278,6 +382,10 @@ def ensure_team(team, passphrase=None):
     if passphrase:
         salt = secrets.token_hex(16)
         secret = {"pass_salt": salt, "pass_hash": _derive(passphrase, salt)}
+    if admin_token:
+        admin_salt = secrets.token_hex(16)
+        secret["admin_salt"] = admin_salt
+        secret["admin_hash"] = _derive(admin_token, admin_salt)
 
     try:
         table().put_item(
@@ -499,7 +607,7 @@ def add_tokens(team, count, estimated=False):
 # --- Snapshot --------------------------------------------------------------
 
 
-def state_snapshot(team):
+def state_snapshot(team, is_admin=False):
     """One frame a cold client can render the entire workspace from.
 
     Load-bearing per CONTRACT.md: a browser joining mid-demo must not have to
@@ -566,6 +674,11 @@ def state_snapshot(team):
         # METADATA row is read wholesale above, so this is the one place that
         # could leak them and it names the fields it sends instead.
         "protected": bool(metadata.get("pass_hash")),
+        # Whether this workspace has an owner at all. Never the hash.
+        "owned": bool(metadata.get("admin_hash")),
+        # Whether the connection asking holds those rights. Decided at the
+        # handshake and passed in — the snapshot does not re-verify a token.
+        "is_admin": bool(is_admin),
         "members": members,
         "memory": memory,
         # Without this a client that joins or reconnects while queued cannot

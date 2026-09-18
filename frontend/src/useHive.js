@@ -71,6 +71,11 @@ const EMPTY_BOARD = {
   // client gets the whole ledger rather than only what happens after it joins.
   history: [],
   spend: [],
+  protected: false,
+  owned: false,
+  // Whether *this* connection holds admin rights. Server-decided at the
+  // handshake; the UI has no other way to know, and must not guess.
+  is_admin: false,
 }
 
 function renumber(queue) {
@@ -129,6 +134,9 @@ export function applyFrame(board, frame) {
         queue: withEta(frame.queue ?? []),
         history: frame.history ?? [],
         spend: frame.spend ?? [],
+        protected: Boolean(frame.protected),
+        owned: Boolean(frame.owned),
+        is_admin: Boolean(frame.is_admin),
       }
 
     case 'agent_state_update': {
@@ -278,6 +286,8 @@ export function useHive(identity) {
   const [board, setBoard] = useState(EMPTY_BOARD)
   const [activity, setActivity] = useState([])
   const [budgetExhausted, setBudgetExhausted] = useState(false)
+  // Terminal: the workspace's rows are gone, so there is nothing to reconnect to.
+  const [deleted, setDeleted] = useState(false)
   // Sticky: once any usage on this board was estimated, the meter's total is
   // partly estimated for the rest of the session and must keep saying so.
   const [usageEstimated, setUsageEstimated] = useState(false)
@@ -358,6 +368,11 @@ export function useHive(identity) {
       // loaded cold can learn it. Sticky either way — never cleared, because
       // an estimate already folded into the total does not stop being one.
       if (frame.estimated || frame.usage_estimated) setUsageEstimated(true)
+      if (frame.event === 'workspace_deleted') {
+        setDeleted(true)
+        return
+      }
+
       if (frame.event === 'state_snapshot') {
         const budget = frame.token_budget ?? 0
         setBudgetExhausted(budget > 0 && (frame.tokens_used ?? 0) >= budget)
@@ -401,6 +416,14 @@ export function useHive(identity) {
         // ever switched on, which they are not. Noted rather than hidden.
         (identity.passphrase
           ? `&passphrase=${encodeURIComponent(identity.passphrase)}`
+          : '') +
+        // Minted by this browser, never returned by the server. Whoever
+        // creates a workspace already holds it, so there is nothing to hand
+        // back and no window in which it could be intercepted. On an existing
+        // workspace it is simply checked, and a token that does not match just
+        // means no admin rights.
+        (identity.adminToken
+          ? `&admin_token=${encodeURIComponent(identity.adminToken)}`
           : '')
       socket = new WebSocket(url)
       socketRef.current = socket
@@ -484,6 +507,22 @@ export function useHive(identity) {
   )
 
   const sendMessage = useCallback((text) => send({ action: 'send_message', text }), [send])
+
+  /* Administration. Every one of these is refused server-side unless this
+   * connection was admitted with the workspace's admin token, so the UI
+   * hiding them is convenience rather than the control. */
+  const setBudget = useCallback(
+    (tokenBudget) => send({ action: 'admin_set_budget', token_budget: tokenBudget }),
+    [send],
+  )
+  const rotatePassphrase = useCallback(
+    (passphrase) => send({ action: 'admin_rotate_passphrase', passphrase }),
+    [send],
+  )
+  const deleteWorkspace = useCallback(
+    () => send({ action: 'admin_delete_workspace' }),
+    [send],
+  )
 
   /** Move this client's avatar, throttled, with a guaranteed trailing send.
    *
@@ -571,6 +610,10 @@ export function useHive(identity) {
     releaseAgent,
     sendMessage,
     moveAvatar,
+    deleted,
+    setBudget,
+    rotatePassphrase,
+    deleteWorkspace,
     configError: WS_URL ? null : 'VITE_WS_URL was not set at build time.',
   }
 }

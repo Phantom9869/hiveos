@@ -101,7 +101,7 @@ fi
 # real `hello`, and asserts on the real `state_snapshot` — and warms the Router
 # on the way through.
 WS_URL="$(stack_output WebSocketURL)" python3 - <<'PY'
-import asyncio, json, os, sys, time
+import asyncio, json, os, sys, time, urllib.parse
 
 try:
     import websockets
@@ -113,7 +113,14 @@ except ImportError:
 async def main():
     url = os.environ["WS_URL"]
     started = time.monotonic()
-    async with websockets.connect(f"{url}?user_id=reset-probe") as ws:
+    # Must join the workspace this script just seeded. Before teams existed
+    # there was only one board and a bare connection was correct; now a probe
+    # without a team lands in the *default* workspace and cheerfully verifies
+    # somebody else's board while reporting on the one you asked for.
+    query = {"user_id": "reset-probe", "team": os.environ.get("TEAM_ID", "alpha")}
+    if os.environ.get("DEMO_PASSPHRASE"):
+        query["passphrase"] = os.environ["DEMO_PASSPHRASE"]
+    async with websockets.connect(f"{url}?{urllib.parse.urlencode(query)}") as ws:
         await ws.send(json.dumps({"action": "hello"}))
         while True:
             frame = json.loads(await asyncio.wait_for(ws.recv(), 20))
