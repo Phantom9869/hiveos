@@ -62,8 +62,7 @@ class TestSetIdle:
             mock_table.update_item.return_value = {}
 
             from backend.shared import scheduler
-            scheduler.set_idle("coder", expected_holder="user_A")
-
+            scheduler.set_idle("alpha", "coder", expected_holder="user_A")
             _, kwargs = mock_table.update_item.call_args
             assert "ConditionExpression" in kwargs, (
                 "set_idle must supply a ConditionExpression — "
