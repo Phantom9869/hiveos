@@ -6,7 +6,8 @@ import {
   CanvasPanel,
   Mark,
   QueuePanel,
-  QuotaPanel,
+  QuotaBar,
+  MemberBar,
   MemoryPanel,
   SlotsPanel,
   StatusRail,
@@ -274,7 +275,7 @@ function Workspace({ identity }) {
         connection={hive.connection}
       />
 
-      <QuotaPanel
+      <QuotaBar
         tokensUsed={board.tokens_used}
         tokenBudget={board.token_budget}
         pctUsed={board.pct_used}
@@ -286,26 +287,31 @@ function Workspace({ identity }) {
         members={board.members}
         me={identity.userId}
         busyUsers={busyUsers}
+        agents={board.agents}
+        queue={board.queue}
         onMove={hive.moveAvatar}
       />
 
-      <SlotsPanel agents={board.agents} me={identity.userId} />
-
-      {/* Two short lists side by side rather than two sparse full-width rows.
-          Together they cost one panel's height instead of two, which is what
-          makes room for the workspace floor above without pushing the request
-          form off a 640x950 window. The memory panel appears only once there
-          is a fact, so the queue takes the full width until then. */}
-      <div className="duo">
-        <QueuePanel queue={board.queue} me={identity.userId} />
-        {board.memory.length > 0 && <MemoryPanel memory={board.memory} />}
-      </div>
+      {/* No SlotsPanel and no QueuePanel here any more. Both said exactly what
+          the room now says — a lit monitor *is* the slot being BUSY, and a
+          "queued #1" label under a person *is* their queue position. Keeping
+          the cards would have been the same state rendered twice, and they
+          cost 266px of a viewport the floor needs. `SlotsPanel` and
+          `QueuePanel` are still exported; nothing else changed about them. */}
+      {board.memory.length > 0 && <MemoryPanel memory={board.memory} />}
 
       <RequestPanel hive={hive} />
 
       <ActivityPanel activity={hive.activity}>
         <ChatComposer hive={hive} />
       </ActivityPanel>
+
+      <MemberBar
+        members={board.members}
+        me={identity.userId}
+        busyUsers={busyUsers}
+        queue={board.queue}
+      />
 
       <ToastStack toasts={hive.toasts} />
     </div>
