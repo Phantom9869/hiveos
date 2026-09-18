@@ -1,0 +1,5 @@
+# Intentionally empty.
+#
+# boto3 and botocore ship with the Lambda python3.13 runtime. Adding them here
+# would only bloat the package and pin an older version than the runtime's.
+# The file exists so `sam build` has a manifest and does not warn on every run.

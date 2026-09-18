@@ -8,15 +8,20 @@ Description: >
   infrastructure across sessions. See ARCHITECTURE.md decision 10.
 
 # ---------------------------------------------------------------------------
-# PHASE 0 deploys this template with the DynamoDB table ONLY.
 # Resources are added incrementally:
-#   Phase 1  -> WebSocket API, Router Lambda
+#   Phase 0  -> DynamoDB table                              DEPLOYED
+#   Phase 1  -> WebSocket API, Router Lambda                DEPLOYED
 #   Phase 2  -> SQS queue + DLQ, Agent Runner Lambda
 #   Phase 3  -> Bedrock IAM permissions on the Agent Runner
 # Sections below are marked with the phase that fills them in.
 # ---------------------------------------------------------------------------
 
 Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    Description: WebSocket API stage. Part of the public wss:// URL.
+
   TokenBudget:
     Type: Number
     Default: 1000000
@@ -37,6 +42,7 @@ Globals:
     Environment:
       Variables:
         TABLE_NAME: !Ref StateTable
+        TEAM_ID: alpha
 
 Resources:
 
@@ -66,13 +72,95 @@ Resources:
   # SAM has no first-class WebSocket resource, so these are raw
   # AWS::ApiGatewayV2::* resources (a SAM template is a CloudFormation
   # superset, so this is supported).
-  #
-  # Needed: Api (ProtocolType WEBSOCKET), Integration, Routes for
-  # $connect / $disconnect / $default, Deployment, Stage, Lambda permissions.
-  #
-  # The Router Lambda's IAM policy MUST include execute-api:ManageConnections
-  # or every broadcast fails with 403. Common and confusing omission.
   # -------------------------------------------------------------------------
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: hiveos-ws
+      ProtocolType: WEBSOCKET
+      # Only $default is declared below, so every action lands in one handler.
+      # Adding a client action in a later phase is a code change, not an
+      # infrastructure change.
+      RouteSelectionExpression: $request.body.action
+
+  RouterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: hiveos-router
+      CodeUri: backend/            # whole backend/ is packaged so `shared` imports work
+      Handler: router.app.lambda_handler
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        # Without this every post_to_connection fails 403 AccessDeniedException.
+        - Statement:
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  RouterInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RouterFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/*'
+
+  WebSocketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RouterFunction.Arn}/invocations'
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebSocketIntegration}'
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebSocketIntegration}'
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $default
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${WebSocketIntegration}'
+
+  # A Deployment is an immutable snapshot of the route table. Lambda code
+  # changes do not need a new one (the integration URI is unchanged), but
+  # adding or removing a route does — and CloudFormation will not recreate
+  # this resource in place. If a route is ever added, rename this logical ID
+  # (e.g. WebSocketDeploymentV2) in the same commit.
+  WebSocketDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+      - DefaultRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref StageName
+      DeploymentId: !Ref WebSocketDeployment
 
   # -------------------------------------------------------------------------
   # PHASE 2 — SQS queue + DLQ, Agent Runner Lambda
@@ -103,8 +191,19 @@ Outputs:
     Description: Configured team token ceiling
     Value: !Ref TokenBudget
 
-  # Added in Phase 1:
-  #   WebSocketURL  — wss:// endpoint the frontend connects to
-  #   WebSocketMgmt — https:// management endpoint for post_to_connection
+  WebSocketURL:
+    Description: wss:// endpoint the frontend connects to
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketURL'
+
+  WebSocketMgmt:
+    Description: https:// management endpoint used by post_to_connection
+    Value: !Sub 'https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+
+  RouterFunctionName:
+    Description: Router Lambda, for sam logs
+    Value: !Ref RouterFunction
+
   # Added in Phase 2:
   #   QueueUrl      — SQS queue URL for the Router to dispatch into

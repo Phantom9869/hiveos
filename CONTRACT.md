@@ -19,12 +19,21 @@ Ranks 3rd in the source-of-truth hierarchy — above `PRD.md`, below deployed AW
 | Agent slot IDs | `coder`, `researcher` |
 | Lambda architecture | `arm64` |
 | Lambda runtime | `python3.13` |
+| WebSocket stage | `prod` |
+| WebSocket URL | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
+
+The WebSocket URL is a stack output (`WebSocketURL`). Read it from CloudFormation rather than pasting it — it changes if the API is ever replaced.
+
+### Lambda packaging
+
+Both functions are built from `CodeUri: backend/` with handlers like `router.app.lambda_handler`, so `backend/shared/` is importable as a top-level `shared` package from either one. No Lambda layer — a layer buys nothing at this size and costs build complexity.
 
 ### Lambda environment variables
 
 | Variable | Set on | Meaning |
 |---|---|---|
 | `TABLE_NAME` | both | DynamoDB table name |
+| `TEAM_ID` | both | Team partition (`alpha` in the MVP) |
 | `QUEUE_URL` | Router | SQS queue URL |
 | `WS_ENDPOINT` | both | API Gateway management endpoint (`https://{api}.execute-api.{region}.amazonaws.com/{stage}`) |
 | `BEDROCK_MODEL_ID` | Agent Runner | Resolved in Phase 0 — see below |
@@ -96,10 +105,23 @@ table.update_item(
 
 All frames are JSON. Client frames carry `action`; server frames carry `event`.
 
+The API's `RouteSelectionExpression` is `$request.body.action`, but only `$connect`, `$disconnect` and `$default` are declared as routes. Every action therefore lands in one handler. **Adding a client action is a code change, never a CloudFormation change** — which matters because `AWS::ApiGatewayV2::Deployment` is an immutable snapshot of the route table.
+
+### Connection handshake
+
+`user_id` and `avatar` are passed as query-string parameters on the socket URL:
+
+```
+wss://…/prod?user_id=alice&avatar=%F0%9F%90%9D
+```
+
+Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connection id>`.
+
 ### Client → server
 
 | `action` | Payload | Handler behaviour |
 |---|---|---|
+| `hello` | — | Reply `state_snapshot` to this connection only. Sent once, immediately after the socket opens |
 | `claim_agent` | `{agent_type, prompt, user_id}` | Try atomic claim → dispatch to SQS, or enqueue and return position |
 | `release_agent` | `{agent_type, user_id}` | Set slot `IDLE`, dispatch the oldest queued task |
 | `send_message` | `{user_id, text}` | Broadcast to team chat |
@@ -109,7 +131,8 @@ All frames are JSON. Client frames carry `action`; server frames carry `event`.
 
 | `event` | Payload | Sent when |
 |---|---|---|
-| `state_snapshot` | `{team, agents[], tokens_used, token_budget, members[], memory[]}` | Immediately after `$connect` — a new client must be able to render everything from this one frame |
+| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, members[], memory[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
+| `chat_message` | `{user_id, text, ts}` | `send_message` runs. `user_id` is resolved from the sender's `CONN#` row, not trusted from the frame |
 | `agent_state_update` | `{agent_type, status, current_user, slot_id}` | Any slot state change |
 | `token_update` | `{tokens_used, token_budget, pct_used}` | After every Bedrock call |
 | `queue_update` | `{user_id, queue_position, estimated_wait_seconds}` | Queue add or removal |
@@ -121,6 +144,18 @@ All frames are JSON. Client frames carry `action`; server frames carry `event`.
 | `error` | `{message}` | Any handled failure worth surfacing |
 
 **`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event.
+
+**Why `hello` exists.** API Gateway does not finish establishing a connection until the `$connect` integration returns, so `post_to_connection` against it inside that handler fails with `GoneException`. The snapshot cannot be pushed from `$connect`; the client pulls it on its first frame instead. Verified on the deployed stack in Phase 1.
+
+### Client connect sequence
+
+```
+open wss://…/prod?user_id=alice&avatar=🐝
+  → server writes CONN# row, broadcasts user_joined to everyone else
+send {"action": "hello"}
+  → server replies state_snapshot on this connection
+render, then apply incremental events as they arrive
+```
 
 ---
 

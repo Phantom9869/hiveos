@@ -85,6 +85,13 @@ aws cloudformation describe-stacks --stack-name hiveos \
   --query 'Stacks[0].Outputs' --output table
 ```
 
+Verify the deployed backend actually behaves — two live clients, fan-out, and stale-connection cleanup, all against real AWS:
+
+```bash
+pip install websockets
+python scripts/ws_smoke.py
+```
+
 Full procedure, verification steps, and troubleshooting: `DEPLOYMENT.md`.
 
 ---
@@ -97,7 +104,7 @@ backend/
   agent_runner/    SQS consumer, agent execution, token accounting, dispatch
   shared/          Broadcast helper, memory tools, DynamoDB access
 frontend/          React + Vite — HUD, workspace, agent chat
-scripts/           Seeding, demo reset, frontend deploy
+scripts/           Seeding, demo reset, WebSocket smoke test, frontend deploy
 template.yaml      SAM — all AWS infrastructure
 ```
 

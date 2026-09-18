@@ -144,9 +144,10 @@ aws budgets describe-budgets --account-id "$(aws sts get-caller-identity --query
 ```bash
 brew install aws-sam-cli          # once
 sam build --use-container         # always --use-container (see note above)
-sam deploy --guided               # first time only; writes samconfig.toml
-sam deploy                        # thereafter
+sam deploy                        # config comes from samconfig.toml, which is committed
 ```
+
+`samconfig.toml` is in the repository and holds no secrets — stack name, region, and build flags only. `--guided` is not needed; running it would only overwrite that file.
 
 **Deployment order is handled by CloudFormation** — do not create stack resources by hand. A one-off `aws dynamodb create-table` produces drift and duplicate resources across `/clear` sessions, which is exactly what the SAM template exists to prevent.
 
@@ -194,13 +195,25 @@ aws cloudformation describe-stacks --stack-name hiveos --query 'Stacks[0].StackS
 aws dynamodb get-item --table-name hiveos-state \
   --key '{"PK":{"S":"TEAM#alpha"},"SK":{"S":"METADATA"}}'
 
-# WebSocket (two terminals)
-npx wscat -c "$(aws cloudformation describe-stacks --stack-name hiveos \
-  --query "Stacks[0].Outputs[?OutputKey=='WebSocketURL'].OutputValue" --output text)"
+# WebSocket — the real check. Two clients, fan-out, GoneException cleanup,
+# and DynamoDB assertions, all against deployed AWS.
+pip install websockets
+python scripts/ws_smoke.py
 
 # Queue depth
 aws sqs get-queue-attributes --queue-url <QUEUE_URL> \
   --attribute-names ApproximateNumberOfMessages
+```
+
+`scripts/ws_smoke.py` resolves the endpoint from the stack output itself, so there is no URL to keep in sync. Run it after every backend deploy — it is the Phase 1 gate and the regression check for every phase after.
+
+For poking by hand instead:
+
+```bash
+npx wscat -c "$(aws cloudformation describe-stacks --stack-name hiveos \
+  --query "Stacks[0].Outputs[?OutputKey=='WebSocketURL'].OutputValue" \
+  --output text)?user_id=alice"
+> {"action":"hello"}
 ```
 
 ---

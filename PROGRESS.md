@@ -14,9 +14,10 @@
 | **Project** | HiveOS — OS-style scheduler for a team's shared AI agent budget |
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
-| **Current phase** | **Phase 1 — WebSocket backbone** |
+| **Current phase** | **Phase 2 — Scheduler + queue (no LLM)** |
 | **Phase status** | `NOT STARTED` |
-| **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB only so far. |
+| **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router Lambda. |
+| **WebSocket endpoint** | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
 | **Repository** | https://github.com/arunishrajput/hiveos (public, `main`) |
 | **AWS account** | `890608337320` · `us-east-1` · IAM user `hiveos-dev` (AdministratorAccess) |
 
@@ -27,8 +28,8 @@
 | # | Phase | Status |
 |---|---|---|
 | 0 | Pre-project setup | `COMPLETE` (Bedrock deferred — see below) |
-| 1 | WebSocket backbone | `NOT STARTED` ← **next** |
-| 2 | Scheduler + queue (no LLM) | `NOT STARTED` |
+| 1 | WebSocket backbone | `COMPLETE` |
+| 2 | Scheduler + queue (no LLM) | `NOT STARTED` ← **next** |
 | 3 | Bedrock + agent + memory | `AT RISK` — blocked on account tier |
 | 4 | Frontend HUD + public URL | `NOT STARTED` |
 | 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` |
@@ -37,6 +38,40 @@
 ---
 
 ## Completed
+
+**Phase 1 — 2026-09-18**
+
+- WebSocket API `hiveos-ws` + Router Lambda `hiveos-router` in `template.yaml`
+- `$connect` writes a `CONN#` row and broadcasts `user_joined`; `$disconnect` deletes it and broadcasts `user_left`
+- `backend/shared/broadcast.py` — fan-out with the mandatory GoneException branch
+- `backend/shared/state.py` — single-table access, Decimal-safe JSON, `state_snapshot()`
+- `$default` handles `hello` (→ `state_snapshot`) and `send_message` (→ `chat_message`)
+- `execute-api:ManageConnections` granted on the Router role
+- `scripts/ws_smoke.py` — 14-check end-to-end harness against deployed AWS
+- `samconfig.toml` created and committed (was missing; see below)
+
+**Verified against deployed AWS, not exit codes** — `python scripts/ws_smoke.py`, 14/14:
+
+| Check | Result |
+|---|---|
+| `state_snapshot` has every field a cold client renders from | ✅ |
+| Snapshot reports both slots `IDLE`, budget `0/1000000` | ✅ |
+| Two clients connected; `user_joined` delivered to the other | ✅ |
+| **One client's message reached both clients** | ✅ Phase 1 gate |
+| Sender resolved from the `CONN#` row, not the frame | ✅ |
+| **Broadcast past a dead connection still delivered to live clients** | ✅ Phase 1 gate |
+| **GoneException branch deleted the stale `CONN#` row** | ✅ Phase 1 gate |
+| Unknown action / malformed JSON return `error`, socket survives | ✅ |
+| No `CONN#` rows leak after everyone disconnects | ✅ |
+
+CloudWatch confirms the branch fired rather than the test merely passing:
+
+```
+[broadcast] gone connection=gaylUe9avQAYKEixkA== — deleting CONN# row
+[broadcast] event=chat_message delivered=2 stale=1
+```
+
+No traceback anywhere in the run.
 
 **Phase 0 — 2026-09-18** (commits `32fd214`, `f303cba`)
 
@@ -124,6 +159,26 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Known issues and discoveries
 
+- **`state_snapshot` cannot be pushed from `$connect`.** API Gateway does not finish
+  establishing the connection until the `$connect` integration returns, so
+  `post_to_connection` against it fails with `GoneException`. `BUILD_PLAN.md` Phase 1
+  task 5 said "sent immediately on `$connect`". Corrected: the client sends
+  `{"action":"hello"}` on socket open and the server replies with the snapshot. Same
+  behaviour, one extra ~50 ms round trip. `CONTRACT.md` documents the handshake.
+- **`send_message` had no matching server event.** Added `chat_message`
+  `{user_id, text, ts}` to `CONTRACT.md`.
+- **`samconfig.toml` was missing from the repository.** Phase 0's `sam deploy --guided`
+  writes it, but it was never committed, so `sam deploy` had no config to read. Created
+  and committed — it holds no secrets. Do not run `--guided` again; it would overwrite it.
+- **Only `$connect` / `$disconnect` / `$default` routes exist**, with
+  `RouteSelectionExpression: $request.body.action`. Every action lands in one handler, so
+  new actions are code changes only. This matters because `AWS::ApiGatewayV2::Deployment`
+  is an immutable route-table snapshot — adding a route later requires renaming that
+  resource's logical ID (noted in `template.yaml`).
+- **Lambda packaging:** both functions build from `CodeUri: backend/` with handlers like
+  `router.app.lambda_handler`, so `shared/` is importable as a top-level package. No layer.
+- **DynamoDB returns `Decimal`** and `json.dumps` rejects it. Every outbound frame goes
+  through `state.dumps()`.
 - **Bedrock *Model access* page is retired.** Serverless models auto-enable on first invoke
   across all commercial regions. The Anthropic use-case form now lives as a banner on the
   **Model catalog** page, not Model access. `DEPLOYMENT.md` Manual Action 2 reflects this.
@@ -139,13 +194,13 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 | Resource | Status |
 |---|---|
-| CloudFormation stack `hiveos` | ✅ `CREATE_COMPLETE` (`us-east-1`) |
+| CloudFormation stack `hiveos` | ✅ `UPDATE_COMPLETE` (`us-east-1`) |
 | DynamoDB `hiveos-state` | ✅ seeded — METADATA + 2 IDLE slots |
 | AWS Budget `hiveos-guardrail` | ✅ $20, 80% alert |
 | GitHub repo | ✅ https://github.com/arunishrajput/hiveos |
-| WebSocket API | ❌ Phase 1 |
+| WebSocket API `hiveos-ws` | ✅ `mel2gpat9c`, stage `prod` |
+| Router Lambda `hiveos-router` | ✅ verified end to end |
 | SQS queue + DLQ | ❌ Phase 2 |
-| Router Lambda | ❌ Phase 1 |
 | Agent Runner Lambda | ❌ Phase 2 |
 | Amplify app / public URL | ❌ Phase 4 |
 
@@ -153,9 +208,15 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Next recommended action
 
-**Start Phase 1 — WebSocket backbone.** Add the WebSocket API and Router Lambda to
-`template.yaml`, implement `$connect` / `$disconnect` / broadcast with the mandatory
-GoneException handler, and gate on two `wscat` clients receiving the same broadcast
-from deployed AWS.
+**Start Phase 2 — Scheduler and queue (no LLM).** The highest-value phase: the queue
+mechanic *is* the product. Add the SQS queue + DLQ and the Agent Runner Lambda, implement
+`claim_agent` with the atomic conditional update from `CONTRACT.md`, enqueue a `QUEUE#`
+item when both slots are taken, and release in `try/finally` so a failing task never
+leaks a slot.
 
-Nothing in Phase 1 depends on Bedrock.
+The broadcast layer it needs is already deployed and verified — `broadcast_to_team()` and
+`state_snapshot()` in `backend/shared/` are ready to use. Extend `scripts/ws_smoke.py`
+with the Phase 2 gate checks (third claim queues, auto-dispatch on release, no slot leak
+on failure).
+
+Nothing in Phase 2 depends on Bedrock.
