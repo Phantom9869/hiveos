@@ -387,7 +387,11 @@ export function useHive(identity) {
 
       const url =
         `${WS_URL}?user_id=${encodeURIComponent(identity.userId)}` +
-        `&avatar=${encodeURIComponent(identity.avatar)}`
+        `&avatar=${encodeURIComponent(identity.avatar)}` +
+        // Only readable by the server on $connect — every frame after this
+        // carries a connection id and nothing else, so the team is recorded
+        // server-side at connect time and looked up from there.
+        `&team=${encodeURIComponent(identity.team || 'alpha')}`
       socket = new WebSocket(url)
       socketRef.current = socket
 

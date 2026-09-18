@@ -32,7 +32,7 @@ FAILED = "failed"
 REFUSED = "refused"
 
 
-def record(user_id, agent_type, tokens, estimated, status, prompt=""):
+def record(team, user_id, agent_type, tokens, estimated, status, prompt=""):
     """Write one task to the ledger. Never raises into the caller.
 
     Deliberately swallowing failures: this is a record *about* work that has
@@ -42,7 +42,7 @@ def record(user_id, agent_type, tokens, estimated, status, prompt=""):
     try:
         state.table().put_item(
             Item={
-                "PK": state.TEAM_PK,
+                "PK": state.team_pk(team),
                 "SK": f"TASK#{state.now_iso_micros()}#{uuid.uuid4().hex[:8]}",
                 "user_id": user_id or "unknown",
                 "agent_type": agent_type or "",
@@ -74,7 +74,7 @@ def view(rows):
     ]
 
 
-def as_context(limit=8):
+def as_context(team, limit=8):
     """Recent tasks as a block a model can read. "" when nothing has run.
 
     This is what `get_task_context` returns, and the reason CONTRACT.md could
@@ -84,7 +84,7 @@ def as_context(limit=8):
     Reads the table itself rather than taking rows, because its caller is a
     tool invocation deep inside a model round trip and has none to hand.
     """
-    rows = sorted(state.query_team("TASK#"), key=lambda item: item["SK"], reverse=True)
+    rows = sorted(state.query_team(team, "TASK#"), key=lambda item: item["SK"], reverse=True)
     if not rows:
         return "The team has not run any agent tasks yet."
 

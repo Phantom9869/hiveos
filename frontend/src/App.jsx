@@ -22,6 +22,10 @@ const STORAGE_KEY = 'hiveos.identity'
 // The Router truncates both of these server-side; matching the limits here
 // keeps what you typed and what arrives the same thing.
 const MAX_USER_ID = 40
+// Mirrors state.TEAM_PATTERN server-side; a name outside it falls back to the
+// default team rather than being rejected, so this is a hint, not a gate.
+const MAX_TEAM = 31
+const DEFAULT_TEAM = 'alpha'
 const MAX_PROMPT = 2000
 const MAX_TEXT = 500
 
@@ -30,7 +34,9 @@ function loadIdentity() {
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw)
-    return parsed?.userId ? parsed : null
+    // `team` was added after the first release; anyone with a stored
+    // identity from before it lands in the default workspace.
+    return parsed?.userId ? { team: DEFAULT_TEAM, ...parsed } : null
   } catch {
     return null
   }
@@ -48,13 +54,17 @@ function saveIdentity(identity) {
 
 function Gate({ onEnter }) {
   const [name, setName] = useState('')
+  const [team, setTeam] = useState(DEFAULT_TEAM)
   const [avatar, setAvatar] = useState(AVATARS[0])
 
   const submit = (event) => {
     event.preventDefault()
     const userId = name.trim().slice(0, MAX_USER_ID)
     if (!userId) return
-    onEnter({ userId, avatar })
+    // Lowercased to match the server: `Alpha` and `alpha` must be one room,
+    // not two that look identical and cannot see each other.
+    const teamId = team.trim().toLowerCase().slice(0, MAX_TEAM) || DEFAULT_TEAM
+    onEnter({ userId, avatar, team: teamId })
   }
 
   return (
@@ -64,9 +74,9 @@ function Gate({ onEnter }) {
           <Mark className="gate__mark" />
           <h1 className="gate__title">HiveOS</h1>
           <p className="gate__blurb">
-            Team Alpha shares two agent slots and one token budget. Pick a name
-            to join the workspace — everything you do is visible to everyone
-            else on the board, live.
+            A workspace shares two agent slots and one token budget. Pick a
+            name and a workspace — everything you do is visible to everyone
+            else on that board, live.
           </p>
         </div>
 
@@ -85,6 +95,26 @@ function Gate({ onEnter }) {
               autoComplete="off"
               autoFocus
             />
+          </div>
+
+          <div>
+            <label className="gate__legend" htmlFor="team">
+              Workspace
+            </label>
+            <input
+              id="team"
+              className="field"
+              value={team}
+              onChange={(event) => setTeam(event.target.value)}
+              maxLength={MAX_TEAM}
+              placeholder={DEFAULT_TEAM}
+              autoComplete="off"
+              aria-describedby="team-hint"
+            />
+            <p className="gate__hint" id="team-hint">
+              Separate workspaces have their own budget, slots, queue and
+              memory — they cannot see each other.
+            </p>
           </div>
 
           <fieldset style={{ border: 0, margin: 0, padding: 0 }}>

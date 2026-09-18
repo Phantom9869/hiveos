@@ -54,7 +54,7 @@ Ship a **deployed, publicly reachable** workspace where three simultaneous brows
 
 | Feature | Behaviour |
 |---|---|
-| Team workspace | One team (`TEAM#alpha`), multiple concurrent members |
+| Team workspace | Any number of isolated teams, each with multiple concurrent members. `alpha` is only the default |
 | Agent slots | 2 named slots, `IDLE` / `BUSY`, with current holder |
 | Real-time token meter | `tokens_used / token_budget`, identical across all browsers, updates without refresh |
 | **Enforced budget ceiling** | Server-side refusal to invoke Bedrock at 100% — a real control, not a gauge |
@@ -76,7 +76,7 @@ Ship a **deployed, publicly reachable** workspace where three simultaneous brows
 
 ### Post-Hackathon
 
-Cognito authentication · multiple teams · priority queue bump · agent marketplace · usage analytics · per-user budgets
+Cognito authentication · team administration (ownership, invites, deletion) · priority queue bump · agent marketplace · usage analytics · per-user budgets
 
 ### Out of scope — never build
 

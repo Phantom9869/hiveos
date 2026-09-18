@@ -36,16 +36,25 @@ def send_to_connection(connection_id, payload):
         )
         return True
     except api.exceptions.GoneException:
-        print(f"[broadcast] gone connection={connection_id} — deleting CONN# row")
-        state.remove_connection(connection_id)
+        # Which team's partition holds this row? Looked up here rather than
+        # passed in, because this function is also called for directed replies
+        # — errors, snapshots — where the caller has no team to hand. The cost
+        # is one GetItem on the *stale* path only; the delivering path, which
+        # is every other call, pays nothing.
+        team = state.connection_team(connection_id)
+        print(
+            f"[broadcast] gone connection={connection_id} team={team}"
+            " — deleting CONN# row"
+        )
+        state.remove_connection(team, connection_id)
         return False
 
 
-def broadcast_to_team(payload, exclude=None):
+def broadcast_to_team(team, payload, exclude=None):
     """Fan a frame out to the team. One dead connection never stops the rest."""
     delivered = 0
     stale = 0
-    for connection_id in state.connection_ids():
+    for connection_id in state.connection_ids(team):
         if connection_id == exclude:
             continue
         if send_to_connection(connection_id, payload):

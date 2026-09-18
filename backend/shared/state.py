@@ -8,6 +8,7 @@ Query away — which is exactly what `state_snapshot` needs.
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -15,8 +16,37 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-TEAM_ID = os.environ.get("TEAM_ID", "alpha")
-TEAM_PK = f"TEAM#{TEAM_ID}"
+# The team a client lands in when it does not name one. Teams are no longer
+# hardcoded — every row is partitioned by team and every function takes one —
+# but a bare connection still has to go somewhere, and that somewhere is the
+# team the demo uses.
+DEFAULT_TEAM = os.environ.get("TEAM_ID", "alpha")
+
+# Team names arrive from a query string, so they are untrusted input that ends
+# up inside a partition key. Anything outside this set could collide two teams
+# into one partition, or forge a `TEAM#` prefix of its own.
+TEAM_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,30}$")
+
+# What a team starts with the first time anyone joins it. Teams bootstrap
+# themselves — requiring a seeding script before a name works would make
+# isolation a deployment step rather than a property of the product.
+DEFAULT_TEAM_BUDGET = int(os.environ.get("TOKEN_BUDGET", "1000000"))
+SLOT_IDS = ("coder", "researcher")
+
+
+def clean_team(name):
+    """Normalise an untrusted team name, falling back to the default.
+
+    Lowercased so `Alpha` and `alpha` are the same room rather than two rooms
+    that look identical in the UI — a team whose members silently cannot see
+    each other is worse than one that rejects the name outright.
+    """
+    candidate = (name or "").strip().lower()
+    return candidate if TEAM_PATTERN.match(candidate) else DEFAULT_TEAM
+
+
+def team_pk(team):
+    return f"TEAM#{clean_team(team)}"
 
 _table = None
 
@@ -65,9 +95,9 @@ def dumps(payload):
 # --- Queries ---------------------------------------------------------------
 
 
-def query_team(sk_prefix=None):
+def query_team(team, sk_prefix=None):
     """Every item for the team, optionally narrowed to one SK prefix."""
-    condition = Key("PK").eq(TEAM_PK)
+    condition = Key("PK").eq(team_pk(team))
     if sk_prefix:
         condition = condition & Key("SK").begins_with(sk_prefix)
 
@@ -85,8 +115,8 @@ def query_team(sk_prefix=None):
 # --- Connections -----------------------------------------------------------
 
 
-def connection_ids():
-    return [item["SK"].split("#", 1)[1] for item in query_team("CONN#")]
+def connection_ids(team):
+    return [item["SK"].split("#", 1)[1] for item in query_team(team, "CONN#")]
 
 
 def spawn_point(connection_id):
@@ -108,7 +138,7 @@ def spawn_point(connection_id):
     }
 
 
-def add_connection(connection_id, user_id, avatar):
+def add_connection(team, connection_id, user_id, avatar):
     member = {
         "user_id": user_id,
         "avatar": avatar,
@@ -116,16 +146,19 @@ def add_connection(connection_id, user_id, avatar):
     }
     table().put_item(
         Item={
-            "PK": TEAM_PK,
+            "PK": team_pk(team),
             "SK": f"CONN#{connection_id}",
             "connected_at": now_iso(),
             **member,
         }
     )
+    # Written together: a member row without its index is a connection nothing
+    # can route a later frame to.
+    bind_connection(connection_id, team)
     return member
 
 
-def move_connection(connection_id, x, y):
+def move_connection(team, connection_id, x, y):
     """Move one avatar. Returns the mover's `user_id`, or None if the row is gone.
 
     Conditional on the row existing so a frame that races `$disconnect` cannot
@@ -135,7 +168,7 @@ def move_connection(connection_id, x, y):
     """
     try:
         response = table().update_item(
-            Key={"PK": TEAM_PK, "SK": f"CONN#{connection_id}"},
+            Key={"PK": team_pk(team), "SK": f"CONN#{connection_id}"},
             UpdateExpression="SET x = :x, y = :y",
             ConditionExpression="attribute_exists(SK)",
             # `Decimal(str(x))`, never `Decimal(x)`. Building a Decimal from a
@@ -152,21 +185,114 @@ def move_connection(connection_id, x, y):
     return (response.get("Attributes") or {}).get("user_id")
 
 
-def remove_connection(connection_id):
+def remove_connection(team, connection_id):
     """Delete a CONN# row and return what was there, or None if it was gone."""
     response = table().delete_item(
-        Key={"PK": TEAM_PK, "SK": f"CONN#{connection_id}"},
+        Key={"PK": team_pk(team), "SK": f"CONN#{connection_id}"},
         ReturnValues="ALL_OLD",
     )
+    unbind_connection(connection_id)
     return response.get("Attributes")
 
 
-def connection_user(connection_id):
+def connection_user(team, connection_id):
     response = table().get_item(
-        Key={"PK": TEAM_PK, "SK": f"CONN#{connection_id}"},
+        Key={"PK": team_pk(team), "SK": f"CONN#{connection_id}"},
         ProjectionExpression="user_id",
     )
     return (response.get("Item") or {}).get("user_id")
+
+
+# --- Connection ownership --------------------------------------------------
+
+
+def ensure_team(team):
+    """Create a team's METADATA and slot rows if this is its first member.
+
+    Teams bootstrap themselves. Requiring `seed.sh` before a name worked would
+    make isolation a deployment step rather than a property of the product —
+    and the whole point is that two people typing different team names get
+    different workspaces without anyone provisioning anything.
+
+    Every write is conditional on the row being absent, so several people
+    joining a brand-new team in the same second cannot each reset it to empty.
+    """
+    pk = team_pk(team)
+    try:
+        table().put_item(
+            Item={
+                "PK": pk,
+                "SK": "METADATA",
+                "name": clean_team(team),
+                "token_budget": DEFAULT_TEAM_BUDGET,
+                "tokens_used": 0,
+                "created_at": now_iso(),
+            },
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+        print(f"[state] bootstrapped new team {clean_team(team)!r}")
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+
+    for slot_id in SLOT_IDS:
+        try:
+            table().put_item(
+                Item={
+                    "PK": pk,
+                    "SK": f"AGENT#{slot_id}",
+                    "slot_id": slot_id,
+                    "status": "IDLE",
+                    "current_user": None,
+                },
+                ConditionExpression="attribute_not_exists(PK)",
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+
+
+def bind_connection(connection_id, team):
+    """Record which team a connection belongs to.
+
+    This row lives *outside* every team partition, keyed `CONN#<id>` / `TEAM`,
+    and it exists because of an awkward asymmetry in API Gateway: the team
+    arrives in the query string, which is only readable on `$connect`. Every
+    frame after that carries a connection ID and nothing else — so without an
+    index, finding a connection's team would mean scanning every team.
+
+    The alternative was to have the client send its team on each frame. That is
+    rejected for the same reason `CONTRACT.md` resolves the *sender* from the
+    stored row rather than the frame: a value the client supplies is a value
+    the client can forge, and here forging it would mean reading another
+    team's board.
+    """
+    table().put_item(
+        Item={
+            "PK": f"CONN#{connection_id}",
+            "SK": "TEAM",
+            "team": clean_team(team),
+            "connected_at": now_iso(),
+        }
+    )
+
+
+def connection_team(connection_id):
+    """Which team this connection is in. `DEFAULT_TEAM` if the row is gone.
+
+    Falling back rather than raising: a missing index row means the connection
+    is already being torn down, and answering into the default team is
+    harmless, where an exception in the router is a dropped frame.
+    """
+    response = table().get_item(
+        Key={"PK": f"CONN#{connection_id}", "SK": "TEAM"},
+        ProjectionExpression="team",
+    )
+    return (response.get("Item") or {}).get("team") or DEFAULT_TEAM
+
+
+def unbind_connection(connection_id):
+    table().delete_item(Key={"PK": f"CONN#{connection_id}", "SK": "TEAM"})
 
 
 # --- Queue -----------------------------------------------------------------
@@ -189,7 +315,7 @@ def _served_from(task_rows):
     return served
 
 
-def last_served():
+def last_served(team):
     """`_served_from` over a fresh read of the `TASK#` ledger.
 
     Read off the ledger rather than tracked separately: it already records who
@@ -200,10 +326,10 @@ def last_served():
     `finally` releases the slot — the job that just finished is already in the
     ledger when the next one is chosen.
     """
-    return _served_from(query_team("TASK#"))
+    return _served_from(query_team(team, "TASK#"))
 
 
-def fair_order(items, served=None):
+def fair_order(team, items, served=None):
     """The queue order: fair queueing, not first-come-first-served.
 
     Sorted by how long each person has gone without a turn, and only then by
@@ -221,18 +347,18 @@ def fair_order(items, served=None):
     the earlier request still wins. With one task each — the common case, and
     the demo case — this is indistinguishable from FIFO.
     """
-    served = last_served() if served is None else served
+    served = last_served(team) if served is None else served
     return sorted(items, key=lambda item: (served.get(item.get("user_id"), ""), item["SK"]))
 
 
-def queue_items(served=None):
+def queue_items(team, served=None):
     """Waiting tasks in the order they will actually be dispatched."""
-    return fair_order(query_team("QUEUE#"), served)
+    return fair_order(team, query_team(team, "QUEUE#"), served)
 
 
-def queue_view(items=None):
+def queue_view(team, items=None):
     """The queue as clients see it: 1-based positions, next up first."""
-    items = queue_items() if items is None else items
+    items = queue_items(team) if items is None else items
     return [
         {
             "user_id": item.get("user_id"),
@@ -255,7 +381,7 @@ def pct_used(used, budget):
     return round(float(used) / float(budget) * 100, 1)
 
 
-def budget_state():
+def budget_state(team):
     """`(tokens_used, token_budget)` straight from METADATA.
 
     METADATA is the single source of truth for the ceiling — deliberately not
@@ -264,11 +390,11 @@ def budget_state():
     disagree with the meter a user is looking at. `TOKEN_BUDGET` only supplies
     the default `seed.sh` writes.
     """
-    item = table().get_item(Key={"PK": TEAM_PK, "SK": "METADATA"}).get("Item") or {}
+    item = table().get_item(Key={"PK": team_pk(team), "SK": "METADATA"}).get("Item") or {}
     return int(item.get("tokens_used", 0)), int(item.get("token_budget", 0))
 
 
-def add_tokens(count, estimated=False):
+def add_tokens(team, count, estimated=False):
     """Atomically add to `tokens_used`; returns a ready `token_update` payload.
 
     `ADD` rather than read-then-write because two agent runs finishing
@@ -292,7 +418,7 @@ def add_tokens(count, estimated=False):
         values[":e"] = True
 
     item = table().update_item(
-        Key={"PK": TEAM_PK, "SK": "METADATA"},
+        Key={"PK": team_pk(team), "SK": "METADATA"},
         UpdateExpression=expression,
         ExpressionAttributeValues=values,
         ReturnValues="ALL_NEW",
@@ -311,7 +437,7 @@ def add_tokens(count, estimated=False):
 # --- Snapshot --------------------------------------------------------------
 
 
-def state_snapshot():
+def state_snapshot(team):
     """One frame a cold client can render the entire workspace from.
 
     Load-bearing per CONTRACT.md: a browser joining mid-demo must not have to
@@ -324,7 +450,7 @@ def state_snapshot():
 
     metadata, agents, members, memory, waiting, tasks = {}, [], [], [], [], []
 
-    for item in query_team():
+    for item in query_team(team):
         sk = item["SK"]
         if sk == "METADATA":
             metadata = item
@@ -364,7 +490,7 @@ def state_snapshot():
 
     return {
         "event": "state_snapshot",
-        "team": metadata.get("name", TEAM_ID),
+        "team": clean_team(team),
         "agents": sorted(agents, key=lambda a: a["slot_id"] or ""),
         "tokens_used": used,
         "token_budget": budget,
@@ -383,7 +509,7 @@ def state_snapshot():
         # the task rows already in hand rather than a second query. Sorting by
         # SK here — as this did — would have the snapshot disagree with the
         # live queue about who is next the moment fairness reorders anything.
-        "queue": queue_view(fair_order(waiting, _served_from(tasks))),
+        "queue": queue_view(team, fair_order(team, waiting, _served_from(tasks))),
         # The ledger. On the snapshot rather than only on a live event for the
         # same reason as everything else here: the client most likely to want
         # "who spent what" is the one that just opened the URL.

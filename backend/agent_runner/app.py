@@ -62,23 +62,27 @@ def lambda_handler(event, context):
 def _handle(task):
     slot_id = task["slot_id"]
     user_id = task.get("user_id", "unknown")
+    # Carried on the message because the runner has no connection to resolve
+    # from — by the time a queued task runs, the requester may have gone.
+    team = state.clean_team(task.get("team_id"))
     print(
-        f"[runner] start slot={slot_id} user={user_id} "
+        f"[runner] start team={team} slot={slot_id} user={user_id} "
         f"conn={task.get('connection_id')}"
     )
 
     try:
         # Returning here still runs `finally`, so a refused task releases its
         # slot exactly like a completed one.
-        if _refuse_over_budget(task):
+        if _refuse_over_budget(team, task):
             return
-        _reply(task, _run_agent(task))
+        _reply(team, task, _run_agent(team, task))
     except Exception:
         # The task failed, not the infrastructure. Tell the user, then fall
         # through to finally — swallowing it here is what stops SQS from
         # redelivering a task we have already accounted for.
         traceback.print_exc()
         history.record(
+            team,
             task.get("user_id"),
             task.get("agent_type") or slot_id,
             tokens=0,
@@ -91,7 +95,7 @@ def _handle(task):
         # Deliberately NOT wrapped: if the release itself fails, the slot is
         # leaked, and an SQS redelivery is the only thing that can still fix
         # it. Better a duplicate response than a deadlocked workspace.
-        scheduler.release_and_dispatch(slot_id)
+        scheduler.release_and_dispatch(team, slot_id)
 
     print(f"[runner] done slot={slot_id} user={user_id}")
 
@@ -99,7 +103,7 @@ def _handle(task):
 # --- The budget ceiling ----------------------------------------------------
 
 
-def _refuse_over_budget(task):
+def _refuse_over_budget(team, task):
     """True if the quota is spent and the agent must not be invoked.
 
     This is the control the product is built around: a real refusal, not a
@@ -110,7 +114,7 @@ def _refuse_over_budget(task):
     while the tasks ahead of it burn what was left, so the only honest moment
     to decide is immediately before the model would be called.
     """
-    used, budget = state.budget_state()
+    used, budget = state.budget_state(team)
     if not budget or used < budget:
         return False
 
@@ -119,6 +123,7 @@ def _refuse_over_budget(task):
     # proves the ceiling is a control rather than a gauge. Zero tokens, and
     # the ledger says so.
     history.record(
+        team,
         task.get("user_id"),
         task.get("agent_type") or task.get("slot_id"),
         tokens=0,
@@ -127,6 +132,7 @@ def _refuse_over_budget(task):
         prompt=task.get("prompt", ""),
     )
     broadcast.broadcast_to_team(
+        team,
         {
             "event": "budget_exhausted",
             "tokens_used": used,
@@ -152,7 +158,7 @@ def _estimate_tokens(*texts):
     return max(1, total // CHARS_PER_TOKEN)
 
 
-def _remember_from_prompt(prompt, requester):
+def _remember_from_prompt(team, prompt, requester):
     """The `remember: k = v` convention, kept as a safety net.
 
     Saving a fact is now the *model's* decision — it has a `set_team_memory`
@@ -167,13 +173,13 @@ def _remember_from_prompt(prompt, requester):
     directive = memory.directive(prompt)
     if not directive:
         return None
-    fact = memory.remember(directive[0], directive[1], requester)
+    fact = memory.remember(team, directive[0], directive[1], requester)
     if fact:
         print(f"[runner] fell back to the remember: convention for {fact['key']!r}")
     return fact
 
 
-def _run_agent(task):
+def _run_agent(team, task):
     """Run one task: load the team's memory, let the model work, hold the slot.
 
     The model call is the only part that can fail in a way the user should
@@ -193,7 +199,7 @@ def _run_agent(task):
     # Before the work, not during it: a queued user's agent must already know
     # the team's facts the moment its turn starts (CONTRACT.md). Deliberately
     # not a tool — a model that forgot to ask would break that guarantee.
-    context = memory.as_context()
+    context = memory.as_context(team)
 
     saved = []
 
@@ -205,7 +211,7 @@ def _run_agent(task):
         because raising here would abandon a task that has already run.
         """
         if name == "set_team_memory":
-            fact = memory.remember(args.get("key"), args.get("value"), requester)
+            fact = memory.remember(team, args.get("key"), args.get("value"), requester)
             if not fact:
                 return "Not saved — a team fact needs both a key and a value."
             saved.append(fact)
@@ -214,7 +220,7 @@ def _run_agent(task):
                 "Every future agent task loads this automatically."
             )
         if name == "get_task_context":
-            return history.as_context()
+            return history.as_context(team)
         return f"There is no tool called {name}."
 
     try:
@@ -229,14 +235,14 @@ def _run_agent(task):
         # blipped is worse than one that answers from composed text and says
         # so — and `estimated=True` keeps the meter honest about it.
         print(f"[runner] model call failed ({type(exc).__name__}: {exc}) — composing fallback")
-        fact = _remember_from_prompt(prompt, requester)
+        fact = _remember_from_prompt(team, prompt, requester)
         result = _stub_agent(prompt, context, agent_type, fact)
     else:
         # The model answered but chose not to save, and the prompt plainly
         # asked. Save it regardless: the fact is what the user asked for, and
         # the row, the broadcast and the next task's context all follow from it.
         if not saved:
-            _remember_from_prompt(prompt, requester)
+            _remember_from_prompt(team, prompt, requester)
 
     _hold_slot(started)
     return result
@@ -290,18 +296,19 @@ def _stub_agent(prompt, context, agent_type, fact):
 # --- Replies ---------------------------------------------------------------
 
 
-def _reply(task, result):
+def _reply(team, task, result):
     """Account for the spend, then tell the room.
 
     The `ADD` happens before either broadcast so no client is ever told about
     a response whose cost was not recorded. `token_update` goes first because
     it describes already-committed state and the meter is the headline number.
     """
-    usage = state.add_tokens(result.tokens, estimated=result.estimated)
+    usage = state.add_tokens(team, result.tokens, estimated=result.estimated)
 
     # After the ADD, never before: the ledger must not be able to report a cost
     # that the team counter has not actually taken.
     history.record(
+        team,
         task.get("user_id"),
         task.get("agent_type") or task["slot_id"],
         tokens=result.tokens,
@@ -313,8 +320,9 @@ def _reply(task, result):
     # `usage` already carries `estimated`, read back from the row, so the
     # broadcast reports the provenance of the whole total rather than of this
     # one call.
-    broadcast.broadcast_to_team({"event": "token_update", **usage})
+    broadcast.broadcast_to_team(team, {"event": "token_update", **usage})
     broadcast.broadcast_to_team(
+        team,
         {
             "event": "agent_response",
             "user_id": task.get("user_id"),

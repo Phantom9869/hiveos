@@ -15,7 +15,7 @@ Ranks 3rd in the source-of-truth hierarchy — above `PRD.md`, below deployed AW
 | DynamoDB table | `hiveos-state` |
 | SQS queue | `hiveos-agent-tasks` |
 | SQS dead-letter queue | `hiveos-agent-tasks-dlq` |
-| Team ID (hardcoded, MVP) | `alpha` |
+| Default team | `alpha` — teams are **not** hardcoded; this is only where a connection lands if it names none |
 | Agent slot IDs | `coder`, `researcher` |
 | Lambda architecture | `arm64` |
 | Lambda runtime | `python3.13` |
@@ -71,11 +71,47 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 
 | PK | SK | Attributes |
 |---|---|---|
-| `TEAM#alpha` | `METADATA` | `name`, `token_budget` (N), `tokens_used` (N), `created_at` |
-| `TEAM#alpha` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
-| `TEAM#alpha` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
-| `TEAM#alpha` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `connection_id`, `enqueued_at` |
-| `TEAM#alpha` | `MEMORY#<slug(key)>` | `key`, `val`, `updated_by`, `created_at` |
+| `TEAM#<team>` | `METADATA` | `name`, `token_budget` (N), `tokens_used` (N), `created_at` |
+| `TEAM#<team>` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
+| `TEAM#<team>` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
+| `TEAM#<team>` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `connection_id`, `enqueued_at` |
+| `TEAM#<team>` | `MEMORY#<slug(key)>` | `key`, `val`, `updated_by`, `created_at` |
+
+### Teams
+
+Every row above is partitioned by team, and every backend function takes the
+team as its first argument. Two people who type different workspace names get
+genuinely separate boards: separate budget, slots, queue, memory, ledger and
+broadcasts.
+
+**A team creates itself on first join** (`state.ensure_team`), with conditional
+writes so several people arriving at a new name in the same second cannot each
+reset it. Requiring `seed.sh` before a name worked would make isolation a
+deployment step rather than a property of the product.
+
+**Team names are untrusted input that ends up in a partition key**, so they are
+validated against `^[a-z0-9][a-z0-9_-]{0,30}$` and lowercased — anything else
+falls back to the default. Lowercasing matters: `Alpha` and `alpha` must be one
+room, not two that look identical and cannot see each other.
+
+| PK | SK | Attributes |
+|---|---|---|
+| `CONN#<connectionId>` | `TEAM` | `team`, `connected_at` |
+
+**The `CONN#…/TEAM` index is not redundant.** API Gateway exposes
+`queryStringParameters` on `$connect` and on nothing afterwards, so every later
+frame carries a connection ID and no team. Without this row, resolving a
+connection's team would mean scanning every team.
+
+The obvious alternative — have the client send its team on each frame — is
+rejected for exactly the reason `CONTRACT.md` already resolves the *sender*
+from the stored row rather than the frame: a value the client supplies is a
+value the client can forge, and forging this one would mean reading another
+team's board.
+
+It is deleted on `$disconnect` alongside the member row. An orphaned index row
+is harmless — it is only ever read by a connection ID that will never recur —
+but it is not cleaned up by `seed.sh`, which is a known MVP simplification.
 
 ### Entity rules
 

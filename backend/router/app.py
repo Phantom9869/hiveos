@@ -54,14 +54,24 @@ def lambda_handler(event, context):
 
 
 def _on_connect(event, connection_id):
+    """The only route that can read the team: `queryStringParameters` is
+    populated on `$connect` and on nothing after it. Everything downstream
+    resolves the team from the CONN# index row instead."""
     params = event.get("queryStringParameters") or {}
     user_id = (params.get("user_id") or f"guest-{connection_id[:6]}").strip()[:MAX_USER_ID]
     avatar = (params.get("avatar") or "\U0001f41d")[:8]
+    team = state.clean_team(params.get("team"))
 
-    member = state.add_connection(connection_id, user_id, avatar)
-    print(f"[connect] connection={connection_id} user={user_id}")
+    # A team nobody has joined before has no budget and no slots. Create them
+    # before the member row, so the first person to arrive sees a working board
+    # rather than an empty one.
+    state.ensure_team(team)
+
+    member = state.add_connection(team, connection_id, user_id, avatar)
+    print(f"[connect] connection={connection_id} user={user_id} team={team}")
 
     broadcast.broadcast_to_team(
+        team,
         {"event": "user_joined", **member},
         exclude=connection_id,
     )
@@ -69,12 +79,13 @@ def _on_connect(event, connection_id):
 
 
 def _on_disconnect(connection_id):
-    previous = state.remove_connection(connection_id) or {}
+    team = state.connection_team(connection_id)
+    previous = state.remove_connection(team, connection_id) or {}
     user_id = previous.get("user_id")
-    print(f"[disconnect] connection={connection_id} user={user_id}")
+    print(f"[disconnect] connection={connection_id} user={user_id} team={team}")
 
     if user_id:
-        broadcast.broadcast_to_team({"event": "user_left", "user_id": user_id})
+        broadcast.broadcast_to_team(team, {"event": "user_left", "user_id": user_id})
     return OK
 
 
@@ -87,29 +98,33 @@ def _on_message(event, connection_id):
         return _error(connection_id, "frame must be a JSON object")
 
     action = body.get("action")
-    print(f"[message] connection={connection_id} action={action}")
+    # Resolved from the stored index row, never from the frame. A team the
+    # client could name per-message is a team the client could read.
+    team = state.connection_team(connection_id)
+    print(f"[message] connection={connection_id} team={team} action={action}")
 
     if action == "hello":
-        broadcast.send_to_connection(connection_id, state.state_snapshot())
+        broadcast.send_to_connection(connection_id, state.state_snapshot(team))
         return OK
 
     if action == "claim_agent":
-        return _claim_agent(connection_id, body)
+        return _claim_agent(team, connection_id, body)
 
     if action == "release_agent":
-        return _release_agent(connection_id, body)
+        return _release_agent(team, connection_id, body)
 
     if action == "move_avatar":
-        return _move_avatar(connection_id, body)
+        return _move_avatar(team, connection_id, body)
 
     if action == "send_message":
         text = (body.get("text") or "").strip()[:MAX_TEXT]
         if not text:
             return _error(connection_id, "send_message requires text")
         broadcast.broadcast_to_team(
+            team,
             {
                 "event": "chat_message",
-                "user_id": _user_for(connection_id, body),
+                "user_id": _user_for(team, connection_id, body),
                 "text": text,
                 "ts": state.now_iso(),
             }
@@ -122,9 +137,9 @@ def _on_message(event, connection_id):
 # --- Scheduling ------------------------------------------------------------
 
 
-def _claim_agent(connection_id, body):
+def _claim_agent(team, connection_id, body):
     """Take a slot if one is free, otherwise take a place in line."""
-    user_id = _user_for(connection_id, body)
+    user_id = _user_for(team, connection_id, body)
     prompt = (body.get("prompt") or "").strip()[:MAX_PROMPT]
     if not prompt:
         return _error(connection_id, "claim_agent requires a prompt")
@@ -135,14 +150,14 @@ def _claim_agent(connection_id, body):
     if agent_type not in scheduler.SLOTS:
         agent_type = None
 
-    if _already_working(user_id):
+    if _already_working(team, user_id):
         return _error(connection_id, "you already have an agent running or queued")
 
-    slot_id = scheduler.claim_any(agent_type, user_id)
+    slot_id = scheduler.claim_any(team, agent_type, user_id)
 
     if slot_id is None:
-        scheduler.enqueue(user_id, agent_type, prompt, connection_id)
-        scheduler.broadcast_queue()
+        scheduler.enqueue(team, user_id, agent_type, prompt, connection_id)
+        scheduler.broadcast_queue(team)
         return OK
 
     # Announce BUSY *before* handing the task to SQS. The slot is already BUSY
@@ -150,23 +165,23 @@ def _claim_agent(connection_id, body):
     # lets a fast-failing task post its reply ahead of this frame, and a client
     # that sees BUSY arrive after the release is left showing a slot that never
     # goes idle again.
-    scheduler.broadcast_slot(slot_id, "BUSY", user_id)
-    scheduler.dispatch(slot_id, user_id, agent_type or slot_id, prompt, connection_id)
+    scheduler.broadcast_slot(team, slot_id, "BUSY", user_id)
+    scheduler.dispatch(team, slot_id, user_id, agent_type or slot_id, prompt, connection_id)
     return OK
 
 
-def _release_agent(connection_id, body):
+def _release_agent(team, connection_id, body):
     """Manual release. The Agent Runner also releases automatically when a
     task ends — this exists so a wedged demo slot can be freed from the UI."""
     agent_type = body.get("agent_type")
     if agent_type not in scheduler.SLOTS:
         return _error(connection_id, f"unknown agent_type: {agent_type!r}")
 
-    scheduler.release_and_dispatch(agent_type)
+    scheduler.release_and_dispatch(team, agent_type)
     return OK
 
 
-def _move_avatar(connection_id, body):
+def _move_avatar(team, connection_id, body):
     """Move this connection's avatar and tell the room.
 
     Coordinates are percentages of the canvas (0-100), not pixels, so three
@@ -183,14 +198,14 @@ def _move_avatar(connection_id, body):
     if x is None or y is None:
         return _error(connection_id, "move_avatar requires numeric x and y")
 
-    user_id = state.move_connection(connection_id, x, y)
+    user_id = state.move_connection(team, connection_id, x, y)
     if user_id is None:
         # The row is gone — the socket is mid-disconnect. Nothing to broadcast,
         # and resurrecting it would put a ghost in everyone's member count.
         return OK
 
     broadcast.broadcast_to_team(
-        {"event": "avatar_moved", "user_id": user_id, "x": x, "y": y}
+        team, {"event": "avatar_moved", "user_id": user_id, "x": x, "y": y}
     )
     return OK
 
@@ -208,7 +223,7 @@ def _coord(value):
     return round(max(0.0, min(100.0, float(value))), 2)
 
 
-def _already_working(user_id):
+def _already_working(team, user_id):
     """One task per user at a time.
 
     Without this a double-clicked "Get Agent" button lets one person hold both
@@ -218,7 +233,7 @@ def _already_working(user_id):
     One query rather than a get per slot plus a queue query: this runs on the
     claim path, which is the interaction the whole demo hangs on.
     """
-    for item in state.query_team():
+    for item in state.query_team(team):
         sk = item["SK"]
         if sk.startswith("AGENT#") and item.get("current_user") == user_id:
             return True
@@ -230,9 +245,9 @@ def _already_working(user_id):
 # --- Helpers ---------------------------------------------------------------
 
 
-def _user_for(connection_id, body):
+def _user_for(team, connection_id, body):
     """Trust the CONN# row over the frame — the row is what $connect recorded."""
-    return state.connection_user(connection_id) or body.get("user_id") or "unknown"
+    return state.connection_user(team, connection_id) or body.get("user_id") or "unknown"
 
 
 def _error(connection_id, message):
