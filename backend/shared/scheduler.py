@@ -95,12 +95,20 @@ def claim_any(preferred, user_id):
     return None
 
 
-def set_idle(slot_id):
+def set_idle(slot_id, expected_holder):
     state.table().update_item(
         Key={"PK": state.TEAM_PK, "SK": f"AGENT#{slot_id}"},
         UpdateExpression="SET #s = :idle, #u = :null REMOVE claimed_at",
-        ExpressionAttributeNames={"#s": "status", "#u": "current_user"},
-        ExpressionAttributeValues={":idle": "IDLE", ":null": None},
+        ConditionExpression="#u = :expected_holder",
+        ExpressionAttributeNames={
+            "#s": "status",
+            "#u": "current_user",
+        },
+        ExpressionAttributeValues={
+            ":idle": "IDLE",
+            ":null": None,
+            ":expected_holder": expected_holder,
+        },
     )
     print(f"[scheduler] released slot={slot_id}")
 
@@ -222,13 +230,13 @@ def broadcast_queue():
 # --- The release path ------------------------------------------------------
 
 
-def release_and_dispatch(slot_id):
+def release_and_dispatch(slot_id, expected_holder):
     """Free a slot, then start the next waiting task. Returns the slot used.
 
     This runs in the Agent Runner's finally block, so it must work even when
     the task it follows blew up. A slot that leaks here deadlocks the demo.
     """
-    set_idle(slot_id)
+    set_idle(slot_id, expected_holder)
     broadcast_slot(slot_id, "IDLE", None)
 
     task = take_next_task()

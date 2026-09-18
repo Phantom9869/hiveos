@@ -157,12 +157,34 @@ def _claim_agent(connection_id, body):
 
 def _release_agent(connection_id, body):
     """Manual release. The Agent Runner also releases automatically when a
-    task ends — this exists so a wedged demo slot can be freed from the UI."""
+    task ends — this exists so a wedged demo slot can be freed from the UI.
+
+    Requires that the requesting user currently holds the slot. Any other
+    caller receives an error; the slot is not modified.
+    """
     agent_type = body.get("agent_type")
     if agent_type not in scheduler.SLOTS:
         return _error(connection_id, f"unknown agent_type: {agent_type!r}")
 
-    scheduler.release_and_dispatch(agent_type)
+    # Resolve who is asking.
+    conn = state.table().get_item(
+        Key={"PK": state.TEAM_PK, "SK": f"CONN#{connection_id}"}
+    ).get("Item", {})
+    requesting_user = conn.get("user_id")
+
+    # Resolve who currently holds the slot.
+    slot = state.table().get_item(
+        Key={"PK": state.TEAM_PK, "SK": f"AGENT#{agent_type}"}
+    ).get("Item", {})
+    current_holder = slot.get("current_user")
+
+    if not requesting_user or requesting_user != current_holder:
+        return _error(connection_id, "you do not hold this slot")
+
+    scheduler.release_and_dispatch(
+        agent_type,
+        expected_holder=requesting_user,
+    )
     return OK
 
 

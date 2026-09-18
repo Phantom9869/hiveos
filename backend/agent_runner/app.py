@@ -88,10 +88,25 @@ def _handle(task):
         )
         _reply_error(task, "agent task failed")
     finally:
-        # Deliberately NOT wrapped: if the release itself fails, the slot is
-        # leaked, and an SQS redelivery is the only thing that can still fix
-        # it. Better a duplicate response than a deadlocked workspace.
-        scheduler.release_and_dispatch(slot_id)
+        try:
+            scheduler.release_and_dispatch(
+                slot_id,
+                expected_holder=user_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from botocore.exceptions import ClientError as _CE
+
+            if (
+                isinstance(exc, _CE)
+                and exc.response["Error"]["Code"]
+                == "ConditionalCheckFailedException"
+            ):
+                print(
+                    f"[runner] slot {slot_id} already released or reassigned — "
+                    "skipping stale release"
+                )
+            else:
+                raise
 
     print(f"[runner] done slot={slot_id} user={user_id}")
 
