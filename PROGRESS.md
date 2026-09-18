@@ -102,9 +102,56 @@ No traceback anywhere in the run.
 
 | Blocker | Blocks | Status |
 |---|---|---|
-| **Bedrock invocation unavailable on this account tier** | Phase 3 only | User attempting Paid Plan upgrade in parallel |
+| **No card on the AWS account — AWS Marketplace cannot subscribe Bedrock third-party models** | Phase 3 only | Needs the user to add a credit/debit card |
 
-### ⛔ Bedrock quota investigation (2026-09-18)
+### ✅ CORRECTED DIAGNOSIS (2026-09-18, verified in the AWS Console)
+
+**The "Free Plan" theory below was wrong. There is no Paid Plan to upgrade to on this
+account, and chasing one is a dead end. Do not re-open it.**
+
+Verified directly in the console (Console Home, Billing Home, Account, Free Tier, Getting
+Started, notifications) — **no Free Plan / Paid Plan UI exists anywhere on this account**:
+
+| Evidence | Finding |
+|---|---|
+| Service provider | **Amazon Web Services India Private Limited (AISPL)** — not AWS Inc. |
+| Account created | 2026-04-27, verified (`CUSTOMER VERIFICATION SUCCESS`), currency INR |
+| Console Home | **No Free Plan banner** — Free Plan accounts always show one |
+| Free Tier page | Legacy model (`AWS Free Usage Tier`, "Always Free"), not credits-based Free Plan |
+| Account page | No plan section, no upgrade CTA |
+| Credits | **$254.62 active** (incl. $100 WeMakeDevs, expires 2027-07-31) |
+| Real spend | $0.46 MTD / $0.84 last month — the account bills normally |
+
+**The actual blocker is the payment instrument:**
+
+| Evidence | Finding |
+|---|---|
+| Payment methods | **1 of 1 — UPI AutoPay (GooglePay). No credit or debit card.** |
+| Backup payment method | Disabled |
+| AWS Marketplace active subscriptions | **0 — "You have no subscriptions"** |
+| Anthropic / AI21 invoke | `AccessDeniedException: INVALID_PAYMENT_INSTRUMENT` |
+| Bedrock Model access page | "For models served from **AWS Marketplace**, a user … must invoke the model once to enable it" |
+
+Anthropic, AI21 and Mistral on Bedrock are served **through AWS Marketplace**. Marketplace
+will not complete a subscription with UPI as the only instrument — it requires a card. That
+is precisely what `INVALID_PAYMENT_INSTRUMENT` reports, and why the subscription list is empty.
+
+**Unresolved residue — do not claim the card fixes everything.** `us.amazon.nova-lite-v1:0`
+is first-party, needs no Marketplace subscription, and *still* fails with
+`ThrottlingException: Too many tokens per day` against a zero quota. Plausibly the same root
+(no payment-verified Bedrock entitlement), but that is inference, not proof. If Nova still
+throttles after a card verifies, it is an AWS Support ticket, not a config fix.
+
+**Action required (user only — Claude must not enter card details):** add a credit/debit card
+at `https://console.aws.amazon.com/billing/home#/paymentpreferences`, then re-run the
+verification command in *Manual actions pending*.
+
+---
+
+### ⛔ SUPERSEDED — original Bedrock quota investigation (2026-09-18)
+
+> Kept for the quota data, which is still accurate and still reproduces. The *conclusion*
+> ("account on the AWS Free Plan") is **wrong** — see the corrected diagnosis above.
 
 Every model invocation fails `ThrottlingException: Too many tokens per day`, including
 models with non-zero per-minute quota. Root cause in Service Quotas (1123 quotas inspected):
@@ -126,12 +173,12 @@ ai21.jamba-1-5-mini-v1:0                      ThrottlingException: Too many toke
 ```
 
 **Not** a permissions, model-access, or use-case-form problem — all three are resolved.
-Hard zeros that cannot be raised via Service Quotas indicate an account still on the AWS
-**Free Plan**. The `$134` credit cannot be spent on Bedrock while this holds. AWS's default
-`My Zero-Spend Budget` ($1) is also present on the account, consistent with that.
+~~Hard zeros that cannot be raised via Service Quotas indicate an account still on the AWS
+**Free Plan**.~~ **← WRONG. Superseded by the corrected diagnosis above: the account is
+AISPL and has no Free/Paid plan concept; the binding failure is the missing card.**
 
-**Decision (user, 2026-09-18):** attempt the Paid Plan upgrade in parallel while Phases 1–2
-proceed. If quotas unlock, real Bedrock drops into Phase 3 unchanged. If not, fall back per
+**Decision (user, 2026-09-18):** proceed with Phases 1–2, which need no Bedrock. If a card is
+added and Bedrock unlocks, real Bedrock drops into Phase 3 unchanged. If not, fall back per
 `ARCHITECTURE.md` decision 7.
 
 #### Re-check after Phase 1 (2026-09-18) — error signature changed, quotas did not
@@ -180,12 +227,12 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 
 ## Manual actions pending
 
-1. **Fix the payment instrument, then upgrade to the Paid Plan** — in this order; the
-   upgrade cannot complete without a valid card.
-   - `https://console.aws.amazon.com/billing/home#/paymentpreferences` — add or replace the
-     card, confirm it verifies without a warning banner
-   - `https://console.aws.amazon.com/billing/home#/account` → **AWS Free Tier** section →
-     upgrade to the Paid Plan
+1. **Add a credit or debit card to the AWS account.** There is no Paid Plan upgrade to do —
+   that theory was checked in the console and disproved. The card is the whole blocker.
+   - `https://console.aws.amazon.com/billing/home#/paymentpreferences` → **Add payment
+     method** → card. UPI AutoPay is currently the only method and AWS Marketplace does not
+     accept it.
+   - Claude cannot do this step — entering payment credentials is off-limits.
    - Verify: `aws bedrock-runtime converse --region us-east-1 --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 --messages '[{"role":"user","content":[{"text":"Say OK"}]}]' --inference-config '{"maxTokens":10}'`
      must return a completion, not `INVALID_PAYMENT_INSTRUMENT` or `ThrottlingException`.
    - Unblocks Phase 3 only. Phase 2 does not need it.
