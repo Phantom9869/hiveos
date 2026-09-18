@@ -172,17 +172,66 @@ def connection_user(connection_id):
 # --- Queue -----------------------------------------------------------------
 
 
-def queue_items():
-    """Waiting tasks in FIFO order.
+def _served_from(task_rows):
+    """When each person's most recent task finished, from rows already in hand.
 
-    The SK is QUEUE#<timestamp>#<uuid> and the timestamp leads, so sorting
-    lexicographically by SK *is* sorting by arrival time. No extra index.
+    The SK leads with a microsecond timestamp, so the largest SK for a user
+    *is* their most recent task. People with no tasks are simply absent, and
+    `fair_order` reads absent as "has waited forever" — which is what it means.
     """
-    return sorted(query_team("QUEUE#"), key=lambda item: item["SK"])
+    served = {}
+    for item in task_rows:
+        user = item.get("user_id")
+        if not user:
+            continue
+        if item["SK"] > served.get(user, ""):
+            served[user] = item["SK"]
+    return served
+
+
+def last_served():
+    """`_served_from` over a fresh read of the `TASK#` ledger.
+
+    Read off the ledger rather than tracked separately: it already records who
+    ran what and when, and a second counter maintained alongside it is one more
+    thing that can disagree with it.
+
+    Accurate at dispatch time because the runner records a task before its
+    `finally` releases the slot — the job that just finished is already in the
+    ledger when the next one is chosen.
+    """
+    return _served_from(query_team("TASK#"))
+
+
+def fair_order(items, served=None):
+    """The queue order: fair queueing, not first-come-first-served.
+
+    Sorted by how long each person has gone without a turn, and only then by
+    arrival. Someone who has never run outranks someone who just did, so one
+    person queueing three tasks cannot drain the whole queue while another
+    waits — they interleave.
+
+    **This is the single definition of queue order.** Display and dispatch both
+    go through it. If the board said "position 1" by arrival while the runner
+    picked by fairness, the number on screen would simply be wrong about who
+    goes next — and this repository has been bitten twice by two orderings that
+    had to agree and eventually did not.
+
+    FIFO remains the tie-break, so among people who have waited equally long
+    the earlier request still wins. With one task each — the common case, and
+    the demo case — this is indistinguishable from FIFO.
+    """
+    served = last_served() if served is None else served
+    return sorted(items, key=lambda item: (served.get(item.get("user_id"), ""), item["SK"]))
+
+
+def queue_items(served=None):
+    """Waiting tasks in the order they will actually be dispatched."""
+    return fair_order(query_team("QUEUE#"), served)
 
 
 def queue_view(items=None):
-    """The queue as clients see it: 1-based positions, oldest first."""
+    """The queue as clients see it: 1-based positions, next up first."""
     items = queue_items() if items is None else items
     return [
         {
@@ -330,7 +379,11 @@ def state_snapshot():
         # Without this a client that joins or reconnects while queued cannot
         # render its own position until someone else's action happens to move
         # the queue. The snapshot has to stand alone (CONTRACT.md).
-        "queue": queue_view(sorted(waiting, key=lambda item: item["SK"])),
+        # Ordered by the same function the runner dispatches with, and from
+        # the task rows already in hand rather than a second query. Sorting by
+        # SK here — as this did — would have the snapshot disagree with the
+        # live queue about who is next the moment fairness reorders anything.
+        "queue": queue_view(fair_order(waiting, _served_from(tasks))),
         # The ledger. On the snapshot rather than only on a live event for the
         # same reason as everything else here: the client most likely to want
         # "who spent what" is the one that just opened the URL.

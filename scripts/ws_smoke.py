@@ -8,7 +8,10 @@ means the deployed system actually behaved, not that a command succeeded.
 Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
 slots claimed, a third claim queued with a real position, auto-dispatch when a
 slot frees, and no slot leak when a task fails. Sections 13-18 cover shared
-memory, token accounting, and the enforced budget ceiling.
+memory, token accounting, and the enforced budget ceiling. 19 covers avatar
+presence and movement; 20 covers fair queueing — that dispatch order follows
+who has waited longest rather than who arrived first, and that the position
+shown on the board is the one actually dispatched.
 
 The harness resets `tokens_used` and clears MEMORY# rows before and after, so
 it is re-runnable — tasks now genuinely spend (estimated) tokens and write
@@ -196,13 +199,36 @@ def memory_rows():
     }
 
 
-def reset_demo_state():
-    """Slots IDLE, queue empty, memory cleared, `tokens_used` back to 0.
+def task_rows():
+    """Every TASK# row's SK."""
+    page = aws(
+        "dynamodb", "query",
+        "--table-name", "hiveos-state",
+        "--key-condition-expression", "PK = :p AND begins_with(SK, :s)",
+        "--expression-attribute-values",
+        json.dumps({":p": {"S": TEAM_PK}, ":s": {"S": "TASK#"}}),
+    )
+    return [i["SK"]["S"] for i in page["Items"]]
 
-    Tasks now spend (estimated) tokens and write MEMORY# rows, so without the
-    last two this harness would only pass the first time it was ever run.
+
+def reset_demo_state():
+    """Slots IDLE, queue empty, memory and history cleared, `tokens_used` 0.
+
+    Tasks spend tokens, write MEMORY# rows and now write TASK# rows, so without
+    all three this harness would only pass the first time it was ever run.
+
+    TASK# matters for two reasons beyond tidiness: `state_snapshot` walks every
+    row in the partition, so leaving them behind slows every frame the harness
+    waits on; and dispatch order is derived from them, so a stale ledger would
+    decide who goes next in the *following* run.
     """
     set_tokens_used(0)
+    for sk in task_rows():
+        aws(
+            "dynamodb", "delete-item",
+            "--table-name", "hiveos-state",
+            "--key", json.dumps({"PK": {"S": TEAM_PK}, "SK": {"S": sk}}),
+        )
     for sk in memory_rows():
         aws(
             "dynamodb", "delete-item",
@@ -710,6 +736,88 @@ async def run_memory_and_budget(url):
     check("no CONN# rows leak after the memory run", leaked == {}, str(leaked))
 
     await run_avatars(url)
+    await run_fairness(url)
+
+
+
+async def run_fairness(url):
+    """Section 20: dispatch order is fairness, not arrival.
+
+    The product claims *fair queueing* and OS-style scheduling. Without this
+    check that claim could regress to plain FIFO silently — nothing else here
+    would notice, because with one task each and nobody having run yet the two
+    orders are identical.
+
+    The setup is fiddly for a real reason: a task completes in about 4.5s
+    (MIN_SLOT_SECONDS plus the model), so both contenders have to be queued
+    inside that window. An earlier version of this let alice be dispatched
+    before bob had even queued, and read a misleading "position 1" twice.
+    """
+    print("\n20. Dispatch order is fair, not first-come — the Phase 8 gate")
+    alice = await websockets.connect(f"{url}?user_id=alice")
+    bob = await websockets.connect(f"{url}?user_id=bob")
+    carol = await websockets.connect(f"{url}?user_id=carol")
+    dave = await websockets.connect(f"{url}?user_id=dave")
+    watcher = await websockets.connect(f"{url}?user_id=watcher")
+    for ws in (alice, bob, carol, dave, watcher):
+        await drain(ws)
+
+    # alice takes a turn, so the ledger knows she was served most recently.
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "one deploy risk",
+    }))
+    await expect(alice, "agent_response", "alice",
+                 where=lambda f: f.get("user_id") == "alice")
+    await asyncio.sleep(2)
+    for ws in (alice, bob, carol, dave, watcher):
+        await drain(ws)
+
+    # Both slots taken by other people.
+    for who, ws in (("carol", carol), ("dave", dave)):
+        await ws.send(json.dumps({
+            "action": "claim_agent", "agent_type": "coder", "prompt": f"{who} holds a slot",
+        }))
+        await expect(watcher, "agent_state_update", "watcher",
+                     where=lambda f, w=who: f.get("current_user") == w)
+
+    # alice asks FIRST, bob SECOND — and bob has never run.
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "alice again",
+    }))
+    await asyncio.sleep(0.35)
+    await bob.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "bob first turn",
+    }))
+    await asyncio.sleep(1.0)
+
+    await watcher.send(json.dumps({"action": "hello"}))
+    snap = await expect(watcher, "state_snapshot", "watcher")
+    order = [(q["user_id"], q["queue_position"]) for q in snap.get("queue", [])]
+    check(
+        "both contenders are waiting at once — the test window held",
+        len(order) == 2,
+        str(order),
+    )
+    check(
+        "**the board ranks the person who has waited longer first, not the earlier arrival**",
+        order and order[0][0] == "bob",
+        str(order),
+    )
+
+    dispatched = await expect(watcher, "agent_state_update", "watcher",
+                              where=lambda f: f.get("status") == "BUSY"
+                              and f.get("current_user") in ("alice", "bob"),
+                              timeout=90)
+    check(
+        "**and dispatches that same person — display and dispatch cannot disagree**",
+        dispatched.get("current_user") == "bob",
+        f"dispatched {dispatched.get('current_user')}, board said {order and order[0][0]}",
+    )
+
+    for ws in (alice, bob, carol, dave, watcher):
+        await ws.close()
+    await asyncio.sleep(10)
+    reset_demo_state()
 
 
 async def run_avatars(url):

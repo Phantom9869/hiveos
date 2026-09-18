@@ -127,7 +127,12 @@ def enqueue(user_id, agent_type, prompt, connection_id):
 
 
 def take_next_task():
-    """Claim ownership of the oldest waiting task, or None if none wait.
+    """Claim ownership of the next waiting task, or None if none wait.
+
+    "Next" is `state.fair_order` — least-recently-served first, arrival only as
+    the tie-break — not simply the oldest. The same function orders the queue
+    the clients are shown, so position 1 on the board is genuinely whoever this
+    will pick.
 
     The conditional delete is the exactly-once gate. Two Agent Runners
     finishing at the same moment both see the same head-of-queue item; only

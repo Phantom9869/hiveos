@@ -82,7 +82,20 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 - **METADATA** — one per team. `tokens_used` is only ever updated with `ADD`, never read-then-write.
 - **CONN#** — one per live WebSocket connection. Deleted on `$disconnect` **and** on any `GoneException` during broadcast. **One row per connection, not per user** — the same `user_id` with two tabs open has two rows, so `state_snapshot.members[]` can contain duplicates. `user_left`, by contrast, carries only a `user_id`, so a client that trusts it blindly removes someone who still has a live socket. The frontend dedupes `members[]` by `user_id` and re-syncs on both membership events.
 - **AGENT#** — one per slot. `IDLE → BUSY` on claim, `BUSY → IDLE` on completion. `current_user` is `null` when `IDLE`.
-- **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched. The timestamp is **microsecond** precision (`%Y-%m-%dT%H:%M:%S.%fZ`), not the second-precision `now_iso()` used everywhere else: at second granularity two people clicking within the same second tie and fall back to UUID order, i.e. random. `connection_id` is carried so the runner can reply directly to the requester once the task finally starts.
+- **QUEUE#** — the SK leads with a microsecond timestamp, so sorting by SK gives arrival order. **Arrival order is not dispatch order.** Deleted when dispatched. The timestamp is **microsecond** precision (`%Y-%m-%dT%H:%M:%S.%fZ`), not the second-precision `now_iso()` used everywhere else: at second granularity two people clicking within the same second tie and fall back to UUID order, i.e. random. `connection_id` is carried so the runner can reply directly to the requester once the task finally starts.
+
+  **Dispatch order is fair queueing, not FIFO** (`state.fair_order`): sorted by
+  how long each person has gone without a turn — read off the `TASK#` ledger —
+  with arrival as the tie-break only. Someone who has never run outranks
+  someone who just did, so a user who re-requests the instant their task
+  finishes cannot jump a colleague who has been waiting. With one task each and
+  nobody having run yet, this is indistinguishable from FIFO, which is why the
+  demo sequence is unaffected.
+
+  **There is exactly one definition of that order and all three consumers use
+  it** — `take_next_task`, `broadcast_queue`, and `state_snapshot`. If the
+  board numbered positions by arrival while the runner picked by fairness, the
+  position on screen would be wrong about who goes next.
 - **TASK#** — the ledger: one row per task that reached the runner, including
   the ones that never ran. `status` is `done`, `failed` or `refused`; a refused
   task records **zero** tokens, which is the clearest evidence that the ceiling
