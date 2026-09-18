@@ -60,7 +60,7 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 | `TEAM#alpha` | `CONN#<connectionId>` | `user_id`, `avatar`, `x` (N), `y` (N), `connected_at` |
 | `TEAM#alpha` | `AGENT#<slotId>` | `status` (`IDLE`\|`BUSY`), `current_user`, `slot_id`, `claimed_at` |
 | `TEAM#alpha` | `QUEUE#<ts>#<uuid>` | `user_id`, `agent_type`, `prompt`, `connection_id`, `enqueued_at` |
-| `TEAM#alpha` | `MEMORY#<uuid>` | `key`, `val`, `updated_by`, `created_at` |
+| `TEAM#alpha` | `MEMORY#<slug(key)>` | `key`, `val`, `updated_by`, `created_at` |
 
 ### Entity rules
 
@@ -69,6 +69,23 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 - **AGENT#** — one per slot. `IDLE → BUSY` on claim, `BUSY → IDLE` on completion. `current_user` is `null` when `IDLE`.
 - **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched. The timestamp is **microsecond** precision (`%Y-%m-%dT%H:%M:%S.%fZ`), not the second-precision `now_iso()` used everywhere else: at second granularity two people clicking within the same second tie and fall back to UUID order, i.e. random. `connection_id` is carried so the runner can reply directly to the requester once the task finally starts.
 - **MEMORY#** — key/value facts saved by agents. No expiry in the MVP.
+
+  **The SK is derived from the key, not a UUID** (`memory._slug`: lowercased,
+  non-alphanumerics collapsed to `_`). This file previously specified
+  `MEMORY#<uuid>`, which made `set_team_memory` non-idempotent — saving the
+  same key twice left two rows carrying the same `key`, and `state_snapshot`
+  handed a client both of them as separate facts. A key/value store keyed by
+  the key makes a write an upsert, which is the behaviour every consumer
+  already assumed. Two keys differing only in case or punctuation collapse to
+  one fact; that is deliberate.
+
+  `created_at` is the **write** time, so an upsert refreshes it and `facts()`
+  orders by most-recently-set.
+
+- **METADATA `usage_estimated`** — set when any spend folded into
+  `tokens_used` was an estimate rather than billed model usage. Sticky: never
+  cleared by the runner, only by `seed.sh` rewriting the row. See
+  *Token provenance* below.
 
 ### Atomic slot claim
 
@@ -135,12 +152,12 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 
 | `event` | Payload | Sent when |
 |---|---|---|
-| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, members[], memory[], queue[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
+| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, usage_estimated, members[], memory[], queue[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
 | `chat_message` | `{user_id, text, ts}` | `send_message` runs. `user_id` is resolved from the sender's `CONN#` row, not trusted from the frame |
 | `agent_state_update` | `{agent_type, status, current_user, slot_id}` | Any slot state change |
-| `token_update` | `{tokens_used, token_budget, pct_used}` | After every Bedrock call |
+| `token_update` | `{tokens_used, token_budget, pct_used, estimated}` | After every agent call that spent tokens |
 | `queue_update` | `{user_id, queue_position, estimated_wait_seconds}` | Queue add or removal |
-| `agent_response` | `{user_id, agent_type, text, tokens_used_this_call}` | Agent task completes |
+| `agent_response` | `{user_id, agent_type, text, tokens_used_this_call, estimated}` | Agent task completes |
 | `memory_updated` | `{key, val, updated_by}` | `set_team_memory` runs |
 | `budget_exhausted` | `{tokens_used, token_budget}` | Bedrock invocation refused at the ceiling |
 | `user_joined` | `{user_id, avatar, x, y}` | `$connect` |
@@ -172,6 +189,43 @@ Two consequences anyone touching the protocol must know:
 2. **`state_snapshot` must never be in the re-sync trigger set** — it would feed itself.
 
 **`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event. `queue[]` exists for exactly this reason: a user who reconnects while waiting would otherwise have no way to learn their own position until somebody else's action happened to move the queue.
+
+### Token provenance — `estimated` / `usage_estimated`
+
+Every frame carrying a token count says where the number came from, because
+while the agent is stubbed it is **not** billed model usage:
+
+| Field | On | Means |
+|---|---|---|
+| `estimated` | `agent_response`, `token_update` | the total this frame reports includes estimated spend |
+| `usage_estimated` | `state_snapshot` | the same fact, for a client that loaded cold |
+
+While stubbed, `tokens_used_this_call` is `len(prompt + memory_context + response) / 4`
+— the standard rough heuristic over the **real** strings, not an invented
+number. When a real Bedrock call replaces `_run_agent`, the count comes from
+the response's usage block and both flags go false.
+
+**The snapshot field is not optional.** A client that was not connected when
+the spend happened — which is every judge opening the public URL — has no
+other way to learn the total is partly estimated, and would otherwise render
+it as billed usage. The flag is sticky once set: an estimate already folded
+into the total does not stop being one. Only `seed.sh` clears it.
+
+### The budget ceiling
+
+Enforced in the Agent Runner immediately before the agent is invoked, never at
+claim time: a task can sit in the queue while the tasks ahead of it spend what
+was left, so the only honest moment to decide is the last one.
+
+**METADATA is the single source of truth for the ceiling**, not the
+`TOKEN_BUDGET` env var. It is the same row the counter increments and the same
+number `state_snapshot` shows a client, so the guard can never disagree with
+the meter a user is looking at. `TOKEN_BUDGET` supplies only the default
+`seed.sh` writes.
+
+On refusal the runner broadcasts `budget_exhausted`, replies `error` to the
+requester, spends nothing, and **still releases the slot** — the refusal path
+is subject to the same no-leak invariant as every other path.
 
 ### Frame ordering
 
@@ -238,13 +292,29 @@ def broadcast_to_team(team_id, payload, apigw, table):
 
 ## Agent tools
 
-| Tool | Input | Behaviour |
+| Tool | Implemented as | Behaviour |
 |---|---|---|
-| `get_team_memory` | — | Read all `MEMORY#` rows; return as a context string prepended to the system prompt |
-| `set_team_memory` | `{key, val}` | Write a `MEMORY#` row; broadcast `memory_updated` |
-| `get_task_context` | `{user_id}` | Return the original prompt and relevant prior task history |
+| `get_team_memory` | `memory.facts()` / `memory.as_context()` | Read all `MEMORY#` rows; return a context block for the system prompt |
+| `set_team_memory` | `memory.remember(key, val, updated_by)` | Upsert a `MEMORY#` row; broadcast `memory_updated` |
+| `get_task_context` | **not built** | See below |
 
 Memory is loaded **before** the model call, not on demand, so a queued user's agent already knows the team's facts the moment it starts.
+
+**`get_task_context` is deliberately not implemented.** It was specified to
+return "the original prompt and relevant prior task history", but no task
+history is stored anywhere — there is no `TASK#` entity, and adding one is
+MVP-Supporting at best (`PRD.md` lists task history under "build if core
+works"). With the prompt already on the SQS message, the tool would return
+nothing a caller does not already have. Build the entity first if this is ever
+wanted.
+
+**How a fact gets saved while the agent is stubbed.** A real model decides to
+call `set_team_memory` itself. The stub has no model, so the trigger is a
+prompt convention: `remember: <key> = <value>` (colon optional,
+case-insensitive). This is the one place the stub differs from a real agent in
+*kind* rather than degree — everything it then touches, the row, the
+broadcast, the context load on the next task, is the real mechanism. It is
+also why the demo narration has to say the agent is stubbed.
 
 ---
 

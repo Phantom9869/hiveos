@@ -205,6 +205,9 @@ function activityFor(frame) {
         who: `${frame.agent_type ?? 'agent'} → ${frame.user_id ?? 'unknown'}`,
         text: frame.text ?? '',
         cost: frame.tokens_used_this_call,
+        // While the agent is stubbed the count is a heuristic over real text,
+        // not billed model usage. Carried through so the UI says so.
+        estimated: Boolean(frame.estimated),
         ts,
       }
     case 'chat_message':
@@ -235,6 +238,9 @@ export function useHive(identity) {
   const [board, setBoard] = useState(EMPTY_BOARD)
   const [activity, setActivity] = useState([])
   const [budgetExhausted, setBudgetExhausted] = useState(false)
+  // Sticky: once any usage on this board was estimated, the meter's total is
+  // partly estimated for the rest of the session and must keep saying so.
+  const [usageEstimated, setUsageEstimated] = useState(false)
 
   const socketRef = useRef(null)
   const resyncRef = useRef(null)
@@ -265,6 +271,12 @@ export function useHive(identity) {
       if (entry) setActivity((prev) => [entry, ...prev].slice(0, MAX_ACTIVITY))
 
       if (frame.event === 'budget_exhausted') setBudgetExhausted(true)
+
+      // `estimated` rides on token_update / agent_response; `usage_estimated`
+      // is the same fact on the snapshot, which is the only way a client that
+      // loaded cold can learn it. Sticky either way — never cleared, because
+      // an estimate already folded into the total does not stop being one.
+      if (frame.estimated || frame.usage_estimated) setUsageEstimated(true)
       if (frame.event === 'state_snapshot') {
         const budget = frame.token_budget ?? 0
         setBudgetExhausted(budget > 0 && (frame.tokens_used ?? 0) >= budget)
@@ -374,6 +386,7 @@ export function useHive(identity) {
     board,
     activity,
     budgetExhausted,
+    usageEstimated,
     holding,
     queued,
     working: Boolean(holding || queued),

@@ -79,7 +79,7 @@ export function StatusRail({ team, members, connection }) {
   )
 }
 
-export function QuotaPanel({ tokensUsed, tokenBudget, pctUsed, exhausted }) {
+export function QuotaPanel({ tokensUsed, tokenBudget, pctUsed, exhausted, estimated }) {
   const pct = Math.max(0, Math.min(100, pctUsed ?? 0))
   const tone = toneFor(pct)
   const remaining = Math.max(0, (tokenBudget ?? 0) - (tokensUsed ?? 0))
@@ -114,11 +114,15 @@ export function QuotaPanel({ tokensUsed, tokenBudget, pctUsed, exhausted }) {
 
       {exhausted ? (
         <p className="quota__note quota__note--alarm">
-          Quota reached. HiveOS stops invoking the model until the budget is raised.
+          Quota reached. HiveOS stops invoking the agent until the budget is raised.
         </p>
       ) : (
         <p className="quota__note">
           {NUM.format(remaining)} tokens left, shared by the whole team
+          {/* The agent is stubbed, so these counts are a heuristic over real
+              text rather than billed model usage. Say so next to the number
+              rather than relying on the narrator to remember. */}
+          {estimated ? ' · estimated, the agent is stubbed' : ''}
         </p>
       )}
     </section>
@@ -213,7 +217,9 @@ export function MemoryPanel({ memory }) {
         <span className="panel__label" id="memory-label">
           Team memory
         </span>
-        <span className="panel__aside">{memory.length} facts</span>
+        <span className="panel__aside">
+          {memory.length} {memory.length === 1 ? 'fact' : 'facts'}
+        </span>
       </div>
       <div className="memory">
         {memory.map((fact) => (
@@ -251,6 +257,7 @@ export function ActivityPanel({ activity }) {
                   {entry.who}
                   {entry.cost ? (
                     <span className="entry__cost">
+                      {entry.estimated ? '~' : ''}
                       {NUM.format(entry.cost)} tokens
                     </span>
                   ) : null}

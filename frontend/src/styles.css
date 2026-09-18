@@ -565,6 +565,9 @@ body {
   font-size: 13px;
   margin: 0;
   overflow-wrap: anywhere;
+  /* Agent output is newline-structured — the memory block it loads is a list.
+     Without this the lines run together into one paragraph. */
+  white-space: pre-wrap;
 }
 
 .entry--response {

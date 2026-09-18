@@ -229,6 +229,7 @@ function Workspace({ identity }) {
         tokenBudget={board.token_budget}
         pctUsed={board.pct_used}
         exhausted={hive.budgetExhausted}
+        estimated={hive.usageEstimated}
       />
 
       <SlotsPanel agents={board.agents} me={identity.userId} />

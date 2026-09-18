@@ -14,8 +14,8 @@
 | **Project** | HiveOS — OS-style scheduler for a team's shared AI agent budget |
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
-| **Current phase** | **Phase 5 — agent chat + 2D canvas (cuttable)** |
-| **Phase status** | `NOT STARTED`. Phase 4 complete; **Phase 3 deferred, not done** |
+| **Current phase** | **Phase 6 — demo readiness** |
+| **Phase status** | `NOT STARTED`. Phases 4 and 3-without-Bedrock complete; Phase 5 recommended cut |
 | **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. Frontend live on Amplify. |
 | **🌐 Public URL** | **https://main.dbavt8jr66qxx.amplifyapp.com** — verified cold, zero setup |
 | **WebSocket endpoint** | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
@@ -35,21 +35,88 @@
 | 0 | Pre-project setup | `COMPLETE` (Bedrock deferred — see below) |
 | 1 | WebSocket backbone | `COMPLETE` |
 | 2 | Scheduler + queue (no LLM) | `COMPLETE` |
-| 3 | Bedrock + agent + memory | `DEFERRED` — blocked on an account-level Bedrock restriction |
+| 3 | Bedrock + agent + memory | `COMPLETE EXCEPT THE MODEL CALL` — memory, token accounting and the ceiling are live |
 | 4 | Frontend HUD + public URL | `COMPLETE` |
-| 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` ← **next**, or cut |
-| 6 | Demo readiness | `NOT STARTED` |
+| 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` — recommended **cut** |
+| 6 | Demo readiness | `NOT STARTED` ← **next** |
 
-**Phase 3 was skipped deliberately** (user decision, 2026-09-18), on the reasoning already
-recorded below: Phase 4 produces the submission, the stub agent exercises the entire
-queue/slot/broadcast path without a single Bedrock call, and the blocker needs an AWS Support
-ticket that will not turn around before the deadline. Shipping Phase 4 on the stub was strictly
-safer than blocking. **Phase 3 is deferred, not cancelled** — if Bedrock ever unlocks it drops
-into one function.
+**Phase 3 was split** (user decisions, 2026-09-18). Phase 4 shipped first because it produces
+the submission; then everything in Phase 3 that does not need a model call was built:
+
+| Phase 3 task | State |
+|---|---|
+| 1. Bedrock IAM permissions | **not done** — deliberately. Granting an unused permission is the opposite of least privilege, and it is a 3-line change in the same commit as the model call. |
+| 2. Strands SDK vs boto3 `converse` | **not done** — nothing to integrate until Bedrock is reachable. |
+| 3. The memory tools | `get_team_memory` / `set_team_memory` **done**. `get_task_context` deliberately not built — no task history exists to return; see `CONTRACT.md`. |
+| 4. Load memory before the call | **done** |
+| 5. Token accounting + `token_update` | **done** — mechanism is real; the number is an estimate while stubbed, and flagged as one |
+| 6. Budget ceiling + `budget_exhausted` | **done, enforced, verified** |
+| 7. Cap `max_tokens` per call | n/a until there is a call. `MAX_TOKENS_PER_CALL` is already plumbed. |
+
+**What remains is one function.** `_run_agent` in `backend/agent_runner/app.py` returns an
+`AgentResult(text, tokens, estimated)`. A real Bedrock call fills the same three fields from
+the response's usage block with `estimated=False`, and nothing else in the system changes.
 
 ---
 
 ## Completed
+
+**Phase 3 without Bedrock — 2026-09-18 — memory, token accounting, enforced ceiling**
+
+- `backend/shared/memory.py` — `facts()`, `as_context()`, `remember()`, `directive()`.
+- `MEMORY#` rows keyed by a **slug of the fact's key**, not a UUID, so a re-save is an upsert.
+  The UUID the contract originally specified made `set_team_memory` non-idempotent and produced
+  duplicate facts in the snapshot. `CONTRACT.md` corrected.
+- `state.budget_state()` / `state.add_tokens()` / `state.pct_used()` — atomic `ADD` with
+  `ALL_NEW` so the broadcast and the row can never disagree.
+- Agent Runner: ceiling check before the agent runs, memory loaded before the agent runs,
+  token accounting after, `token_update` + `agent_response` + `memory_updated` broadcasts.
+- Token provenance (`estimated` / `usage_estimated`) so no client can present an estimate as
+  billed model usage — including a client that loaded cold.
+- Demo budget seeded at **5,000** (`TOKEN_BUDGET=5000 ./scripts/seed.sh`), see below.
+
+**Verified against deployed AWS — `python scripts/ws_smoke.py`, 49/49:**
+
+| Check | Result |
+|---|---|
+| Saving a fact broadcasts `memory_updated` team-wide, attributed to its author | ✅ |
+| `MEMORY#` row written; SK derived from the key | ✅ |
+| **Another user's later agent already knows the fact without being told** | ✅ Phase 3 gate |
+| Re-saving a key upserts — the team still knows exactly one deploy window | ✅ |
+| `token_update` carries the new total and budget; DynamoDB agrees | ✅ |
+| The increment equals the cost the response reported — no lost increment | ✅ |
+| `pct_used` matches `tokens_used / token_budget` | ✅ |
+| A cold client's snapshot also reports the usage as estimated | ✅ |
+| `budget_exhausted` broadcast with the numbers that caused it | ✅ |
+| **At the ceiling the agent is genuinely not invoked — not one token spent** | ✅ Phase 3 gate |
+| A refused task still releases its slot — no leak on the refusal path | ✅ |
+
+Confirmed live on the public URL too: the meter ticks (0 → 42 → 109 tokens), the memory panel
+appears with the fact, and a later task's response contains the loaded context.
+
+**The honesty problem, and what was done about it.** The stub spends no real tokens, so a
+meter that moved would be reporting invented numbers — on a product whose entire pitch is
+token governance. Three things keep it straight:
+
+1. The count is `len(prompt + context + response) / 4` over the **real** strings — the standard
+   heuristic, not a fabricated figure.
+2. Every frame carrying a count sets `estimated`, and the snapshot carries `usage_estimated`
+   for clients that loaded cold. The UI says *"estimated, the agent is stubbed"* next to the
+   number and prefixes per-task costs with `~`.
+3. `README.md` and this file say so in plain text.
+
+**A hole in that safeguard was found and fixed during verification.** The `estimated` flag
+originally rode only on live `token_update` frames, so a browser loading the public URL cold —
+which is *every judge* — saw an unlabelled total that was in fact estimated. Fixed by
+persisting `usage_estimated` on the METADATA row and returning it on `state_snapshot`. There is
+now a smoke-test check for exactly that case.
+
+**Why the demo budget is 5,000.** At 1,000,000 a ~68-token stub task moves the meter 0.007% —
+invisible. The strip is ~68 segments, so one segment is 1.48%; a 5,000 budget puts one task at
+1.36%, i.e. almost exactly one segment per task. This is not a trick to inflate the numbers:
+5,000 with 68-token tasks is the same *fraction of the meter* that 1,000,000 would be with
+13,600-token tasks, which is the order `PRD.md` cites for agentic workloads. Change it with
+`TOKEN_BUDGET=<n> ./scripts/seed.sh`; nothing in code hardcodes it.
 
 **Phase 4 — 2026-09-18 — Frontend HUD and public URL**
 
@@ -204,22 +271,25 @@ No traceback anywhere in the run.
 
 ### What the Bedrock blocker actually costs the demo
 
-Now that the HUD is live, the consequence is concrete and worth being honest about on camera:
+Much less than it did, now that the Bedrock-free half of Phase 3 is built. **Every beat in the
+demo script is demonstrable.** What remains missing is narrow:
 
-- **The token meter renders correctly but never moves on its own.** The stub agent reports
-  `tokens_used_this_call: 0` and nothing broadcasts `token_update`, so the quota strip sits at
-  `0 / 1,000,000` for the whole demo. The client-side handler for `token_update` is implemented
-  and correct per `CONTRACT.md`, but **no server code path emits that event yet** — it arrives
-  with Phase 3. The meter's thresholds and geometry were verified by rendering the real
-  component against the built CSS at nine percentages; the live tick is what is missing.
-- **Team memory never populates**, so the memory panel stays hidden (it renders only when there
-  are facts). The "Alice saves a fact, Charlie's agent already knows it" beat in the demo script
-  cannot be shown.
-- **`budget_exhausted` cannot be demonstrated end to end**, because nothing spends tokens.
+- **The agent's text is composed, not generated.** It echoes the task, lists the team facts it
+  loaded, and says it is a stub. It cannot answer an actual question, so do not ask it one on
+  camera — show it *saving* and *carrying* a fact instead, which is the real claim.
+- **Token counts are estimates**, derived from the real strings (see above). Labelled as such
+  in the UI, so this is disclosed rather than hidden.
+- **A fact is saved by a prompt convention** (`remember: key = value`) rather than by the model
+  choosing to call the tool. The row, the broadcast and the context load are all real.
 
-Everything else in the demo script — the shared board, the slot lifecycle, the real queue
-position, auto-dispatch — is live and recorded above. Per `PRD.md`, the honest framing is
-fallback ladder rung 3: *mock agent responses, stated plainly.*
+Everything else — the shared board, slot lifecycle, real queue positions, auto-dispatch,
+shared memory crossing users, the enforced ceiling — is live and verified above.
+
+Per `PRD.md`, the honest framing is fallback ladder rung 3: *mock agent responses, stated
+plainly.* One sentence covers it: **"The agent behind these slots is stubbed — Bedrock is
+quota-blocked on this account — so the text is canned and the token counts are estimates.
+Everything around it, the scheduling, the queue, the shared memory and the enforced budget
+ceiling, is real and running on AWS right now."**
 
 ### ⛔ Card added 2026-09-18 — did not unblock Bedrock
 
@@ -395,6 +465,13 @@ Nothing on this list blocks the submission.
   normally. The custom rule is applied exactly as written (`aws amplify get-app --app-id
   dbavt8jr66qxx --query 'app.customRules'` confirms it). Harmless for the MVP — there is one
   route, `/`, and it returns a clean 200. Not worth a redeploy; do not chase it.
+- **A flag that only rides on incremental events is invisible to a cold client.** The
+  `estimated` token-provenance flag shipped on `token_update` only, so the browser most likely
+  to see the board — a judge opening the URL for the first time — got an unlabelled number.
+  Anything that qualifies what the board *shows* has to be on `state_snapshot` too. Same family
+  of bug as the queue ETA below; the snapshot is the only thing a cold client ever reads.
+- **`ws_smoke.py` assumes it is the only client.** Four CONN#-leak checks fail if any browser
+  anywhere is pointed at the deployed URL. Not a regression — close the tabs.
 - **`state_snapshot` is less detailed than the incremental events it replaces.** The re-sync
   pattern in `useHive.js` trades exactness for self-healing, and anything carried *only* on an
   incremental frame gets wiped when the snapshot lands. `estimated_wait_seconds` was the first
@@ -489,36 +566,41 @@ and no build service role, which makes it fully scriptable. The consequence is t
 
 ## Next recommended action
 
-**Go to Phase 6 — demo readiness. Skip Phase 5.**
+**Go to Phase 6 — demo readiness. Cut Phase 5.**
 
-There is a submittable deliverable right now, and `BUILD_PLAN.md` is explicit that Phase 5 is
-the first thing to cut and that nothing downstream depends on it. With the deadline on
-2026-09-20 and the video being the only judge touchpoint, rehearsing and recording beats adding
-a 2D canvas.
-
-**But consider this Phase-3-without-Bedrock slice first (~1 session), because it buys demo
-beats that Phase 5 does not:**
-
-- `backend/shared/memory.py` + the `MEMORY#` rows
-- `get_team_memory` / `set_team_memory` and the `memory_updated` broadcast
-- The budget ceiling check and `budget_exhausted`
-
-None of these need a model call. The frontend **already renders all three** (memory panel,
-`memory_updated` handler, `budget_exhausted` handler and the alarm state) — they are dark only
-because no server path emits them. Wiring them up would restore the memory beat from the demo
-script and make the enforced ceiling demonstrable, which is the single most distinctive claim
-in `PRD.md`. A `set_team_memory` triggered by a keyword in the stub agent's prompt would be
-enough, and honest, as long as the video says the agent is stubbed.
-
-Weigh that against simply recording now. **Recording something that works outranks both.**
+Every feature in `PRD.md`'s Must list is now built, deployed and verified. `BUILD_PLAN.md` is
+explicit that Phase 5 is the first thing to cut and that nothing downstream depends on it. With
+the deadline on 2026-09-20 and the video the only judge touchpoint, **rehearsing and recording
+is now the highest-value work by a wide margin.** There is nothing left to build that improves
+the submission more than a clean take does.
 
 If Bedrock is ever unblocked: open with one `bedrock-runtime converse` call and nothing more —
-the evidence says it needs AWS Support. `_run_agent` in `backend/agent_runner/app.py` is the
-single seam it drops into; nothing else in the runner changes.
+the evidence says it needs AWS Support. Then fill in `_run_agent` and add
+`bedrock:InvokeModel` to the Agent Runner role in `template.yaml` (the Phase 3 section is
+already stubbed out with a comment). Nothing else changes.
+
+### Suggested demo run sheet
+
+The script in `BUILD_PLAN.md` works as written. Concretely, with three browsers:
+
+1. `TOKEN_BUDGET=5000 ./scripts/seed.sh` — clean board.
+2. Alice and Bob each request an agent → both slots BUSY on all three screens, meter ticks.
+3. Charlie requests → real queue position #1, visible everywhere.
+4. A slot frees → Charlie auto-dispatches. **This is the money shot.**
+5. Alice: `remember: deploy window = Friday 16:00 UTC` → fact appears on every screen.
+6. Charlie asks anything → his agent's response already carries Alice's fact.
+7. Say the stub sentence (above) once, plainly.
+
+For the ceiling beat, seed a nearly-spent budget instead: `TOKEN_BUDGET=100 ./scripts/seed.sh`,
+then one task pushes it over and the refusal is real on camera.
 
 ### Before recording
 
-- `./scripts/seed.sh` resets the board to a clean demo state.
+- `TOKEN_BUDGET=5000 ./scripts/seed.sh` resets the board to a clean demo state — slots IDLE,
+  queue and memory cleared, counter zeroed.
+- **Close stray browser tabs before running `ws_smoke.py`.** Its CONN#-leak checks assert the
+  table holds no connection rows, so one live browser fails four checks that have nothing to do
+  with the code. This cost time once already.
 - Pre-warm both Lambdas — a cold Router adds visible latency to the first claim.
 - Three browsers at ~640 px wide each is the layout the HUD was designed for; it fits without
   scrolling at 640×880.

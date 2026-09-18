@@ -7,7 +7,12 @@ means the deployed system actually behaved, not that a command succeeded.
 
 Sections 1-6 cover the WebSocket backbone; 7-12 cover the scheduler: both
 slots claimed, a third claim queued with a real position, auto-dispatch when a
-slot frees, and no slot leak when a task fails.
+slot frees, and no slot leak when a task fails. Sections 13-18 cover shared
+memory, token accounting, and the enforced budget ceiling.
+
+The harness resets `tokens_used` and clears MEMORY# rows before and after, so
+it is re-runnable — tasks now genuinely spend (estimated) tokens and write
+facts.
 
     pip install websockets
     python scripts/ws_smoke.py
@@ -15,6 +20,12 @@ slot frees, and no slot leak when a task fails.
 Resolves the wss:// URL from the CloudFormation stack output, so it never
 needs a hardcoded endpoint. Requires the AWS CLI on PATH for the DynamoDB
 assertions.
+
+**Close every browser tab pointed at the deployed URL before running this.**
+The CONN#-leak checks assert the table holds *no* connection rows, so a live
+browser anywhere in the world counts as a leak and fails four checks that have
+nothing to do with the code. If those four are the only failures, that is
+almost certainly what happened.
 """
 
 import argparse
@@ -121,8 +132,67 @@ def queue_rows():
     return [user for _, user in scheduler_rows()[1]]
 
 
-def reset_scheduler_state():
-    """Both slots IDLE, queue empty — so this harness is re-runnable."""
+def metadata_row():
+    """`(tokens_used, token_budget)` from the METADATA row."""
+    page = aws(
+        "dynamodb", "get-item",
+        "--table-name", "hiveos-state",
+        "--key", json.dumps({"PK": {"S": TEAM_PK}, "SK": {"S": "METADATA"}}),
+    )
+    item = page.get("Item") or {}
+    return (
+        int(item.get("tokens_used", {}).get("N", 0)),
+        int(item.get("token_budget", {}).get("N", 0)),
+    )
+
+
+def set_tokens_used(value):
+    """Drive `tokens_used` directly.
+
+    The only way to reach the budget ceiling without actually spending a
+    budget, which is what makes the refusal path testable at all.
+    """
+    aws(
+        "dynamodb", "update-item",
+        "--table-name", "hiveos-state",
+        "--key", json.dumps({"PK": {"S": TEAM_PK}, "SK": {"S": "METADATA"}}),
+        "--update-expression", "SET tokens_used = :n",
+        "--expression-attribute-values", json.dumps({":n": {"N": str(value)}}),
+    )
+
+
+def memory_rows():
+    """Every MEMORY# row: {SK: (key, val, updated_by)}."""
+    page = aws(
+        "dynamodb", "query",
+        "--table-name", "hiveos-state",
+        "--key-condition-expression", "PK = :p AND begins_with(SK, :s)",
+        "--expression-attribute-values",
+        json.dumps({":p": {"S": TEAM_PK}, ":s": {"S": "MEMORY#"}}),
+    )
+    return {
+        i["SK"]["S"]: (
+            i.get("key", {}).get("S"),
+            i.get("val", {}).get("S"),
+            i.get("updated_by", {}).get("S"),
+        )
+        for i in page["Items"]
+    }
+
+
+def reset_demo_state():
+    """Slots IDLE, queue empty, memory cleared, `tokens_used` back to 0.
+
+    Tasks now spend (estimated) tokens and write MEMORY# rows, so without the
+    last two this harness would only pass the first time it was ever run.
+    """
+    set_tokens_used(0)
+    for sk in memory_rows():
+        aws(
+            "dynamodb", "delete-item",
+            "--table-name", "hiveos-state",
+            "--key", json.dumps({"PK": {"S": TEAM_PK}, "SK": {"S": sk}}),
+        )
     for slot in ("coder", "researcher"):
         aws(
             "dynamodb", "put-item",
@@ -187,7 +257,7 @@ async def expect(ws, event, who, timeout=RECV_TIMEOUT, where=None):
 
 async def run(url):
     print(f"\nEndpoint: {url}\n")
-    reset_scheduler_state()
+    reset_demo_state()
 
     print("1. Connect + opening snapshot")
     alice = await websockets.connect(f"{url}?user_id=alice&avatar=%F0%9F%90%9D")
@@ -206,9 +276,12 @@ async def run(url):
         == [("coder", "IDLE"), ("researcher", "IDLE")],
         str(snapshot["agents"]),
     )
+    # Not hardcoded to 1,000,000: the demo is seeded with a smaller budget so
+    # real token counts are visible on the meter (TOKEN_BUDGET=… ./scripts/seed.sh),
+    # and this harness has to pass at whatever budget is actually seeded.
     check(
-        "snapshot carries the real token budget",
-        snapshot["token_budget"] == 1000000 and snapshot["tokens_used"] == 0,
+        "snapshot carries a real token budget and a reset counter",
+        snapshot["token_budget"] > 0 and snapshot["tokens_used"] == 0,
         f"{snapshot['tokens_used']}/{snapshot['token_budget']}",
     )
 
@@ -352,9 +425,9 @@ async def run_scheduler(url):
                         where=lambda f: f.get("user_id") == "alice")
     check("alice's stub agent responded", bool(done.get("text")), str(done)[:120])
     check(
-        "stub agent spends no tokens — the meter stays honest until Phase 3",
-        done.get("tokens_used_this_call") == 0,
-        str(done.get("tokens_used_this_call")),
+        "the response reports a token cost, flagged estimated while stubbed",
+        done.get("tokens_used_this_call", 0) > 0 and done.get("estimated") is True,
+        f"tokens={done.get('tokens_used_this_call')} estimated={done.get('estimated')}",
     )
 
     dispatched = await expect(carol, "agent_state_update", "carol",
@@ -419,9 +492,194 @@ async def run_scheduler(url):
     for ws in (alice, bob, carol):
         await ws.close()
     await asyncio.sleep(8)  # let bob's in-flight task finish and release
-    reset_scheduler_state()
+    reset_demo_state()
     leaked = connection_rows()
     check("no CONN# rows leak after the scheduler run", leaked == {}, str(leaked))
+
+    await run_memory_and_budget(url)
+
+
+async def run_memory_and_budget(url):
+    """Phase 3 (Bedrock-free) gate: shared memory, token accounting, ceiling."""
+    print("\n13. Shared team memory")
+    alice = await websockets.connect(f"{url}?user_id=alice")
+    bob = await websockets.connect(f"{url}?user_id=bob")
+    await drain(alice)
+    await drain(bob)
+
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder",
+        "prompt": "remember: deploy window = Friday 16:00 UTC",
+    }))
+
+    saved = await expect(alice, "memory_updated", "alice")
+    check(
+        "saving a fact broadcasts memory_updated",
+        (saved.get("key"), saved.get("val")) == ("deploy window", "Friday 16:00 UTC"),
+        str(saved),
+    )
+    check(
+        "the fact reaches the whole team, not just the author",
+        (await expect(bob, "memory_updated", "bob")).get("key") == "deploy window",
+    )
+    check(
+        "the fact is attributed to whoever saved it",
+        saved.get("updated_by") == "alice",
+        str(saved.get("updated_by")),
+    )
+
+    rows = memory_rows()
+    check(
+        "MEMORY# row written to DynamoDB",
+        list(rows.values()) == [("deploy window", "Friday 16:00 UTC", "alice")],
+        str(rows),
+    )
+    check(
+        "the SK is derived from the key, so a re-save is an upsert",
+        list(rows) == ["MEMORY#deploy_window"],
+        str(list(rows)),
+    )
+
+    await expect(alice, "agent_response", "alice",
+                 where=lambda f: f.get("user_id") == "alice")
+    await asyncio.sleep(2)
+
+    print("\n14. Memory crosses to another user — the Phase 3 gate")
+    await drain(bob)
+    await bob.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder",
+        "prompt": "when can I ship?",
+    }))
+    answered = await expect(bob, "agent_response", "bob",
+                            where=lambda f: f.get("user_id") == "bob")
+    check(
+        "bob's agent already knows alice's fact without being told",
+        "Friday 16:00 UTC" in answered.get("text", ""),
+        answered.get("text", "")[:160],
+    )
+
+    print("\n15. Re-saving a key upserts rather than duplicating")
+    await asyncio.sleep(2)
+    await drain(alice)
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder",
+        "prompt": "remember: Deploy Window = Monday 09:00 UTC",
+    }))
+    await expect(alice, "memory_updated", "alice")
+    await expect(alice, "agent_response", "alice",
+                 where=lambda f: f.get("user_id") == "alice")
+    rows = memory_rows()
+    check(
+        "the team still knows exactly one deploy window, now updated",
+        len(rows) == 1 and list(rows.values())[0][1] == "Monday 09:00 UTC",
+        str(rows),
+    )
+
+    print("\n16. Token accounting")
+    await asyncio.sleep(2)
+    before, budget = metadata_row()
+    await drain(bob)
+    await bob.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "estimate this task",
+    }))
+    meter = await expect(bob, "token_update", "bob")
+    spent = await expect(bob, "agent_response", "bob",
+                         where=lambda f: f.get("user_id") == "bob")
+
+    check(
+        "token_update is broadcast with the new total and the budget",
+        meter.get("tokens_used", 0) > before and meter.get("token_budget") == budget,
+        f"{meter.get('tokens_used')}/{meter.get('token_budget')} (was {before})",
+    )
+    check(
+        "token_update is flagged estimated while the agent is stubbed",
+        meter.get("estimated") is True,
+        str(meter.get("estimated")),
+    )
+
+    # The cold-load case: a client that was not watching when the spend
+    # happened must still be told the total is partly estimated.
+    cold = await websockets.connect(f"{url}?user_id=cold")
+    await cold.send(json.dumps({"action": "hello"}))
+    snap = await expect(cold, "state_snapshot", "cold")
+    await cold.close()
+    check(
+        "a cold client's snapshot also reports the usage as estimated",
+        snap.get("usage_estimated") is True and snap.get("tokens_used", 0) > 0,
+        f"usage_estimated={snap.get('usage_estimated')} used={snap.get('tokens_used')}",
+    )
+    check(
+        "pct_used matches tokens_used/token_budget",
+        abs(meter.get("pct_used", -1)
+            - round(meter["tokens_used"] / meter["token_budget"] * 100, 1)) < 0.05,
+        f"pct={meter.get('pct_used')}",
+    )
+
+    await asyncio.sleep(2)
+    persisted, _ = metadata_row()
+    check(
+        "DynamoDB agrees with what was broadcast — no lost increment",
+        persisted == meter["tokens_used"],
+        f"dynamo={persisted} broadcast={meter['tokens_used']}",
+    )
+    check(
+        "the increment equals the cost the response reported",
+        persisted - before == spent.get("tokens_used_this_call"),
+        f"delta={persisted - before} reported={spent.get('tokens_used_this_call')}",
+    )
+
+    print("\n17. The budget ceiling is enforced — the Phase 3 gate")
+    # Drive the counter to the ceiling. The only way to test the refusal
+    # without actually spending a budget.
+    set_tokens_used(budget)
+    at_ceiling, _ = metadata_row()
+    check("counter parked at the ceiling", at_ceiling == budget, f"{at_ceiling}/{budget}")
+
+    await drain(alice)
+    await alice.send(json.dumps({
+        "action": "claim_agent", "agent_type": "coder", "prompt": "one more task",
+    }))
+    exhausted = await expect(alice, "budget_exhausted", "alice")
+    check(
+        "budget_exhausted is broadcast with the numbers that caused it",
+        exhausted.get("tokens_used") == budget
+        and exhausted.get("token_budget") == budget,
+        str(exhausted),
+    )
+    refused = await expect(alice, "error", "alice")
+    check(
+        "the requester is told the agent was not invoked",
+        "quota" in refused.get("message", "").lower(),
+        str(refused),
+    )
+
+    await asyncio.sleep(3)
+    after_refusal, _ = metadata_row()
+    check(
+        "**the agent was genuinely not invoked — not one token was spent**",
+        after_refusal == budget,
+        f"{after_refusal} (ceiling {budget})",
+    )
+    slots = agent_rows()
+    check(
+        "a refused task still releases its slot — no leak on the refusal path",
+        sorted(slots.values()) == [("IDLE", None), ("IDLE", None)],
+        str(slots),
+    )
+
+    print("\n18. Cleanup")
+    for ws in (alice, bob):
+        await ws.close()
+    await asyncio.sleep(3)
+    reset_demo_state()
+    used_after, _ = metadata_row()
+    check(
+        "demo state reset — counter zeroed and memory cleared",
+        used_after == 0 and memory_rows() == {},
+        f"tokens_used={used_after} facts={len(memory_rows())}",
+    )
+    leaked = connection_rows()
+    check("no CONN# rows leak after the memory run", leaked == {}, str(leaked))
 
 
 def main():

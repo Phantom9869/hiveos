@@ -147,6 +147,71 @@ def queue_view(items=None):
     ]
 
 
+# --- Token accounting ------------------------------------------------------
+
+
+def pct_used(used, budget):
+    """One definition of the percentage, shared by the snapshot and every
+    `token_update`. Two copies would eventually disagree by a rounding step
+    and the meter would flicker between them."""
+    if not budget:
+        return 0
+    return round(float(used) / float(budget) * 100, 1)
+
+
+def budget_state():
+    """`(tokens_used, token_budget)` straight from METADATA.
+
+    METADATA is the single source of truth for the ceiling — deliberately not
+    the `TOKEN_BUDGET` env var. It is the same row the counter increments and
+    the same number `state_snapshot` hands a client, so the guard can never
+    disagree with the meter a user is looking at. `TOKEN_BUDGET` only supplies
+    the default `seed.sh` writes.
+    """
+    item = table().get_item(Key={"PK": TEAM_PK, "SK": "METADATA"}).get("Item") or {}
+    return int(item.get("tokens_used", 0)), int(item.get("token_budget", 0))
+
+
+def add_tokens(count, estimated=False):
+    """Atomically add to `tokens_used`; returns a ready `token_update` payload.
+
+    `ADD` rather than read-then-write because two agent runs finishing
+    together would otherwise lose one of the two increments — and an
+    undercounted meter is exactly the failure the product claims to prevent.
+
+    `ALL_NEW` so the budget comes back in the same round trip that moved the
+    counter. Reading it separately would let the broadcast describe a state
+    that no longer matches the row it came from.
+
+    `estimated` sets a sticky `usage_estimated` flag on the row. It is sticky
+    and never cleared here on purpose: once any estimated spend is folded into
+    the total, the *total* is partly estimated for as long as it stands, and a
+    client loading cold has no other way to learn that. Only `seed.sh` clears
+    it, by rewriting METADATA from scratch.
+    """
+    expression = "ADD tokens_used :n"
+    values = {":n": count}
+    if estimated:
+        expression += " SET usage_estimated = :e"
+        values[":e"] = True
+
+    item = table().update_item(
+        Key={"PK": TEAM_PK, "SK": "METADATA"},
+        UpdateExpression=expression,
+        ExpressionAttributeValues=values,
+        ReturnValues="ALL_NEW",
+    )["Attributes"]
+
+    used = int(item.get("tokens_used", 0))
+    budget = int(item.get("token_budget", 0))
+    return {
+        "tokens_used": used,
+        "token_budget": budget,
+        "pct_used": pct_used(used, budget),
+        "estimated": bool(item.get("usage_estimated", False)),
+    }
+
+
 # --- Snapshot --------------------------------------------------------------
 
 
@@ -200,7 +265,12 @@ def state_snapshot():
         "agents": sorted(agents, key=lambda a: a["slot_id"] or ""),
         "tokens_used": used,
         "token_budget": budget,
-        "pct_used": round(float(used) / float(budget) * 100, 1) if budget else 0,
+        "pct_used": pct_used(used, budget),
+        # Whether any of that total is an estimate rather than billed model
+        # usage. Carried on the snapshot so a client loading cold — the most
+        # likely way anyone sees this board — is told too, not just clients
+        # that happened to be watching when the spend happened.
+        "usage_estimated": bool(metadata.get("usage_estimated", False)),
         "members": members,
         "memory": memory,
         # Without this a client that joins or reconnects while queued cannot
