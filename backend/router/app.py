@@ -21,6 +21,8 @@ on the first frame after the socket opens.
 import json
 import traceback
 
+from botocore.exceptions import ClientError
+
 from shared import broadcast, scheduler, state
 
 OK = {"statusCode": 200}
@@ -292,11 +294,18 @@ def _release_agent(team, connection_id, body):
     if not requesting_user or requesting_user != current_holder:
         return _error(connection_id, "you do not hold this slot")
 
-    scheduler.release_and_dispatch(
-        team,
-        agent_type,
-        expected_holder=requesting_user,
-    )
+    try:
+        scheduler.release_and_dispatch(
+            team,
+            agent_type,
+            expected_holder=requesting_user,
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") == (
+            "ConditionalCheckFailedException"
+        ):
+            return _error(connection_id, "slot changed before it could be released")
+        raise
     return OK
 
 
