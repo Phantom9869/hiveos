@@ -210,6 +210,105 @@ export function QueuePanel({ queue, me }) {
   )
 }
 
+/** How far one arrow-key press moves you, in canvas percent. */
+const STEP = 4
+
+const ARROWS = {
+  ArrowUp: [0, -STEP],
+  ArrowDown: [0, STEP],
+  ArrowLeft: [-STEP, 0],
+  ArrowRight: [STEP, 0],
+}
+
+/* The shared workspace floor.
+ *
+ * Absolutely positioned markers inside a fixed-ratio box, moved with a CSS
+ * transition — no canvas element, no game engine, no animation loop
+ * (ARCHITECTURE.md rules a game engine out, and nothing here needs one).
+ * Positions are percentages, so the same board renders identically at any
+ * window width, which is the property the three-browser demo depends on.
+ */
+export function CanvasPanel({ members, me, busyUsers, onMove }) {
+  const move = (event) => {
+    const box = event.currentTarget.getBoundingClientRect()
+    if (!box.width || !box.height) return
+    onMove(
+      ((event.clientX - box.left) / box.width) * 100,
+      ((event.clientY - box.top) / box.height) * 100,
+    )
+  }
+
+  const nudge = (event) => {
+    const delta = ARROWS[event.key]
+    if (!delta) return
+    event.preventDefault()
+    const self = members.find((m) => m.user_id === me)
+    onMove((Number(self?.x) || 0) + delta[0], (Number(self?.y) || 0) + delta[1])
+  }
+
+  return (
+    <section className="panel" aria-labelledby="floor-label">
+      <div className="panel__head">
+        <span className="panel__label" id="floor-label">
+          Workspace floor
+        </span>
+        <span className="panel__aside">click or use arrow keys to move</span>
+      </div>
+
+      <div
+        className="floor"
+        onClick={move}
+        onKeyDown={nudge}
+        tabIndex={0}
+        role="application"
+        aria-label={
+          `Shared workspace floor. ${members.length} ` +
+          `${members.length === 1 ? 'person' : 'people'} present. ` +
+          'Click or use the arrow keys to move your marker.'
+        }
+      >
+        {members.map((member) => {
+          const mine = member.user_id === me
+          const busy = busyUsers.has(member.user_id)
+          return (
+            <div
+              key={member.user_id}
+              className={`pawn ${mine ? 'pawn--mine' : ''} ${busy ? 'pawn--busy' : ''}`}
+              style={{
+                left: `${Math.max(0, Math.min(100, Number(member.x) || 0))}%`,
+                top: `${Math.max(0, Math.min(100, Number(member.y) || 0))}%`,
+              }}
+            >
+              <span className="pawn__body">{member.avatar || '🐝'}</span>
+              <span className="pawn__name">
+                {mine ? 'you' : member.user_id}
+                {busy && <span className="pawn__work" aria-label="running a task" />}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+/* Team-level events you would otherwise miss because you were looking at a
+ * different panel. Deliberately only two kinds — a toast for everything turns
+ * into noise nobody reads, and on a recording it covers the board. */
+export function ToastStack({ toasts }) {
+  return (
+    <div className="toasts" role="status" aria-live="polite">
+      {toasts.map((toast) => (
+        <article className={`toast toast--${toast.kind}`} key={toast.id}>
+          <p className="toast__title">{toast.title}</p>
+          <p className="toast__text">{toast.text}</p>
+          {toast.who && <p className="toast__who">saved by {toast.who}</p>}
+        </article>
+      ))}
+    </div>
+  )
+}
+
 export function MemoryPanel({ memory }) {
   return (
     <section className="panel" aria-labelledby="memory-label">
@@ -233,7 +332,7 @@ export function MemoryPanel({ memory }) {
   )
 }
 
-export function ActivityPanel({ activity }) {
+export function ActivityPanel({ activity, children }) {
   return (
     <section className="panel panel--grow" aria-labelledby="activity-label">
       <div className="panel__head">
@@ -268,6 +367,8 @@ export function ActivityPanel({ activity }) {
           ))}
         </div>
       )}
+
+      {children}
     </section>
   )
 }

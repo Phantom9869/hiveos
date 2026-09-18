@@ -5,6 +5,7 @@ partition key and is separated by SK prefix, so the whole world state is one
 Query away — which is exactly what `state_snapshot` needs.
 """
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 TEAM_ID = os.environ.get("TEAM_ID", "alpha")
 TEAM_PK = f"TEAM#{TEAM_ID}"
@@ -87,12 +89,30 @@ def connection_ids():
     return [item["SK"].split("#", 1)[1] for item in query_team("CONN#")]
 
 
+def spawn_point(connection_id):
+    """A scattered starting position, derived from the connection ID.
+
+    Everyone used to spawn at (0, 0), which stacked every avatar in one corner
+    of the canvas — on a three-browser demo that reads as "the workspace is
+    broken", not "nobody has moved yet". Derived from the ID rather than
+    randomised so a client and the server agree without another round trip, and
+    so a reconnect does not teleport someone across the room.
+
+    Kept to the middle 60% of each axis: the corners are where the avatar
+    collides with the canvas caption and the edge labels.
+    """
+    digest = hashlib.sha1(connection_id.encode()).digest()
+    return {
+        "x": Decimal(20 + digest[0] * 60 // 255),
+        "y": Decimal(20 + digest[1] * 60 // 255),
+    }
+
+
 def add_connection(connection_id, user_id, avatar):
     member = {
         "user_id": user_id,
         "avatar": avatar,
-        "x": 0,
-        "y": 0,
+        **spawn_point(connection_id),
     }
     table().put_item(
         Item={
@@ -103,6 +123,33 @@ def add_connection(connection_id, user_id, avatar):
         }
     )
     return member
+
+
+def move_connection(connection_id, x, y):
+    """Move one avatar. Returns the mover's `user_id`, or None if the row is gone.
+
+    Conditional on the row existing so a frame that races `$disconnect` cannot
+    resurrect a dead connection as a half-populated row — `state_snapshot`
+    reads every CONN# row as a live member, so that ghost would show up in the
+    member count on every screen.
+    """
+    try:
+        response = table().update_item(
+            Key={"PK": TEAM_PK, "SK": f"CONN#{connection_id}"},
+            UpdateExpression="SET x = :x, y = :y",
+            ConditionExpression="attribute_exists(SK)",
+            # `Decimal(str(x))`, never `Decimal(x)`. Building a Decimal from a
+            # float carries the full binary expansion — Decimal(24.92) is
+            # 24.9200000000000017053..., and boto3's DYNAMODB_CONTEXT raises
+            # decimal.Inexact rather than silently rounding it.
+            ExpressionAttributeValues={":x": Decimal(str(x)), ":y": Decimal(str(y))},
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return None
+        raise
+    return (response.get("Attributes") or {}).get("user_id")
 
 
 def remove_connection(connection_id):

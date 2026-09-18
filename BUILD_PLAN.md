@@ -164,6 +164,11 @@ Every phase ends with: verify → update `PROGRESS.md` → update docs → inspe
 
 **Cut this entire phase if Phase 3 or 4 overran.** The HUD is the product; this is the wrapper.
 
+> **Built, 2026-09-18.** Not cut. Phase 3 is blocked by an AWS account restriction rather than
+> overrun, and every MVP-Critical item was finished and verified with two days left — the
+> condition `CLAUDE.md` says MVP-Supporting work should be built under. "Blocked externally" is
+> not "ran out of time"; conflating them cost an unnecessary cut. See `PROGRESS.md`.
+
 ### Tasks
 
 1. Sidebar: agent chat, response display, "thinking" indicator, team memory facts list.

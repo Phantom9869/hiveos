@@ -25,8 +25,10 @@ the deployed URL and run it again.**
 Then:
 
 - [ ] `rehearse.py --takes 2` passed within the last hour
-- [ ] Three browser windows, **~640 px wide each**, side by side. The HUD was built for this;
-      it fits without scrolling at 640×880.
+- [ ] Three browser windows, **640×950 each**, side by side. The HUD is built for this; the
+      board is 933 px tall with the memory panel showing, so it fits without scrolling. (It was
+      640×880 before the workspace floor landed — a shorter window now cuts off the activity
+      log, which still scrolls but is no longer fully visible.)
 - [ ] Each window is a **separate browser or profile**. The entry gate persists to
       `localStorage['hiveos.identity']`, so two tabs of the same origin share one identity and
       you will end up with three "Alice"s.
@@ -59,10 +61,15 @@ agents on their own machine; this is a cloud governance layer for a team sharing
 
 ### 0:25–0:45 · Three browsers, one workspace
 
-Point at all three screens. Do not click yet.
+Click once on the **workspace floor** in each window, so each marker visibly moves on the other
+two screens. This is the cheapest possible proof that the three windows are one live board —
+much stronger than pointing at three identical numbers, which a viewer could assume were
+screenshots.
 
 > Three people, one workspace, one budget. Same meter, same slots, same queue — on every
-> screen, live.
+> screen, live. When I move here, it moves there.
+
+Keep it to one click each — the floor is the opening handshake, not the point of the demo.
 
 ### 0:45–1:30 · The queue moment `[~1s of product time]`
 
@@ -95,8 +102,10 @@ SQS is the durable at-least-once handoff for tasks that are actually running.
 
 This runs itself. Alice's task finishes, and three things happen in sequence — let them land.
 
-1. Alice's fact appears in **team memory on all three screens**, attributed to her
-2. Her slot frees → **Charlie is auto-dispatched into it** *(rehearsed: 187–234 ms)*
+1. A **toast** fires on all three screens and Alice's fact appears in **team memory**,
+   attributed to her
+2. Her slot frees → **Charlie is auto-dispatched into it** *(rehearsed: 187–234 ms)*, and
+   Charlie's marker on the floor picks up its working indicator
 3. ~5 seconds later Charlie's response arrives — **already carrying Alice's fact**
 
 > Alice saved one fact for the team. Her slot frees, Charlie is dispatched automatically — he

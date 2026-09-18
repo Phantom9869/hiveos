@@ -681,6 +681,76 @@ async def run_memory_and_budget(url):
     leaked = connection_rows()
     check("no CONN# rows leak after the memory run", leaked == {}, str(leaked))
 
+    await run_avatars(url)
+
+
+async def run_avatars(url):
+    """Phase 5: the shared workspace floor."""
+    print("\n19. Avatar presence and movement")
+    alice = await websockets.connect(f"{url}?user_id=alice&avatar=%F0%9F%90%9D")
+    bob = await websockets.connect(f"{url}?user_id=bob&avatar=%F0%9F%A6%8A")
+    await alice.send(json.dumps({"action": "hello"}))
+    snapshot = await expect(alice, "state_snapshot", "alice")
+
+    spots = {m["user_id"]: (m["x"], m["y"]) for m in snapshot["members"]}
+    check(
+        "everyone spawns somewhere different — no pile-up in one corner",
+        len(set(spots.values())) == len(spots) and len(spots) >= 2,
+        str(spots),
+    )
+
+    await drain(alice)
+    await bob.send(json.dumps({"action": "move_avatar", "x": 24.92, "y": 69.74}))
+    moved = await expect(alice, "avatar_moved", "alice")
+    check(
+        "a move is broadcast to the rest of the team, not just the mover",
+        moved.get("user_id") == "bob",
+        str(moved),
+    )
+    # The regression that matters. 24.92 is not representable in binary
+    # floating point, so `Decimal(x)` from a float raises decimal.Inexact
+    # inside boto3 and the move is silently lost — while the mover's own
+    # optimistic UI still shows them somewhere nobody else sees. Coordinates
+    # like 73.5 or 0.25 *are* representable and pass either way, which is
+    # exactly why this check uses one that is not.
+    check(
+        "**an awkward float survives the round trip — Decimal(str(x)), not Decimal(x)**",
+        (float(moved.get("x", -1)), float(moved.get("y", -1))) == (24.92, 69.74),
+        f"{moved.get('x')},{moved.get('y')}",
+    )
+
+    await bob.send(json.dumps({"action": "move_avatar", "x": 999, "y": -50}))
+    clamped = await expect(alice, "avatar_moved", "alice")
+    check(
+        "out-of-range coordinates are clamped to the board, not rejected",
+        (float(clamped["x"]), float(clamped["y"])) == (100.0, 0.0),
+        f"{clamped['x']},{clamped['y']}",
+    )
+
+    for bad in ("over there", True, None):
+        await bob.send(json.dumps({"action": "move_avatar", "x": bad, "y": 3}))
+        refused = await expect(bob, "error", "bob")
+        check(
+            f"a non-numeric coordinate ({bad!r}) is refused",
+            "numeric" in refused.get("message", ""),
+            refused.get("message", ""),
+        )
+
+    await alice.send(json.dumps({"action": "hello"}))
+    resnap = await expect(alice, "state_snapshot", "alice")
+    where = [(m["x"], m["y"]) for m in resnap["members"] if m["user_id"] == "bob"]
+    check(
+        "a client loading cold sees where everyone is standing",
+        where and (float(where[0][0]), float(where[0][1])) == (100.0, 0.0),
+        str(where),
+    )
+
+    for ws in (alice, bob):
+        await ws.close()
+    await asyncio.sleep(3)
+    leaked = connection_rows()
+    check("no CONN# rows leak after the avatar run", leaked == {}, str(leaked))
+
 
 def main():
     parser = argparse.ArgumentParser()

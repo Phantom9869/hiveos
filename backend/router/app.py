@@ -10,7 +10,7 @@ The API's RouteSelectionExpression is `$request.body.action` but only
 the route table static — Phase 2 adds actions, not CloudFormation resources.
 
 Phase 1 handles `hello` and `send_message`; Phase 2 adds `claim_agent` and
-`release_agent`. `move_avatar` arrives in Phase 5.
+`release_agent`; Phase 5 adds `move_avatar`.
 
 Why `hello` exists: API Gateway does not finish establishing a connection
 until the $connect integration returns, so post_to_connection against it fails
@@ -99,6 +99,9 @@ def _on_message(event, connection_id):
     if action == "release_agent":
         return _release_agent(connection_id, body)
 
+    if action == "move_avatar":
+        return _move_avatar(connection_id, body)
+
     if action == "send_message":
         text = (body.get("text") or "").strip()[:MAX_TEXT]
         if not text:
@@ -161,6 +164,48 @@ def _release_agent(connection_id, body):
 
     scheduler.release_and_dispatch(agent_type)
     return OK
+
+
+def _move_avatar(connection_id, body):
+    """Move this connection's avatar and tell the room.
+
+    Coordinates are percentages of the canvas (0-100), not pixels, so three
+    browsers at different widths agree on where everyone is standing —
+    "identical on every screen" is the product's whole claim, and a pixel
+    coordinate would break it on the first mismatched window.
+
+    The position is stored per *connection* — the CONN# row is what carries it —
+    but drawn per user: `state_snapshot.members[]` deliberately omits
+    `connection_id`, so the client dedupes by `user_id` and a second tab moves
+    the same marker. One person, one marker. See CONTRACT.md.
+    """
+    x, y = _coord(body.get("x")), _coord(body.get("y"))
+    if x is None or y is None:
+        return _error(connection_id, "move_avatar requires numeric x and y")
+
+    user_id = state.move_connection(connection_id, x, y)
+    if user_id is None:
+        # The row is gone — the socket is mid-disconnect. Nothing to broadcast,
+        # and resurrecting it would put a ghost in everyone's member count.
+        return OK
+
+    broadcast.broadcast_to_team(
+        {"event": "avatar_moved", "user_id": user_id, "x": x, "y": y}
+    )
+    return OK
+
+
+def _coord(value):
+    """A canvas coordinate clamped to 0-100, or None if it is not a number.
+
+    `bool` is excluded deliberately: it is a subclass of `int` in Python, so
+    `{"x": true}` would otherwise be accepted and silently become 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / inf
+        return None
+    return round(max(0.0, min(100.0, float(value))), 2)
 
 
 def _already_working(user_id):

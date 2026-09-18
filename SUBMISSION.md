@@ -46,6 +46,8 @@ A deployed, public, multi-user workspace where:
   before their task starts
 - The budget is an **enforced ceiling, not a gauge** — at 100% the server refuses to invoke the
   agent, and not one token is spent
+- A shared **workspace floor** shows who is in the room and who is mid-task, so "three people,
+  one board" is something you can see rather than something the narrator claims
 
 Measured against the deployed system, not localhost:
 
@@ -53,7 +55,8 @@ Measured against the deployed system, not localhost:
 |---|---|
 | A claim reaching a second browser | **282 ms** |
 | Auto-dispatch visible after a slot frees | **187 ms** |
-| End-to-end checks against real AWS | **49/49** (`scripts/ws_smoke.py`) |
+| An avatar move painted on a second browser | **270–294 ms** |
+| End-to-end checks against real AWS | **58/58** (`scripts/ws_smoke.py`) |
 | Rehearsed demo sequence | **12/12**, two consecutive unattended takes (`scripts/rehearse.py`) |
 
 Timings are click-to-paint across two separate browsers — a 20 ms DOM sampler in the *observing*
@@ -154,6 +157,21 @@ and a queue ETA that got erased 500 ms after appearing because the snapshot didn
 were both invisible to unit tests and obvious the moment I asserted on frames arriving at a
 second, *observing* client. Every check in this repo runs against deployed AWS for that reason —
 a zero exit code proves a command succeeded, not that the system behaved.
+
+**A passing test can be passing for the wrong reason.** Avatar moves were silently failing:
+`Decimal(24.92)` built from a float carries its binary expansion and boto3 raises
+`decimal.Inexact` rather than rounding. My own test had passed — because I had picked `73.5` and
+`21.25` as "obviously fractional" coordinates, and those are exactly representable in binary
+floating point. Only a real mouse click produced one that wasn't. The failure mode was the worst
+kind for this product: the mover's optimistic UI still moved them, so they were standing
+somewhere **nobody else could see**. Choosing awkward test data is a skill, and tidy numbers are
+a trap.
+
+**A green measurement can describe a broken screen.** When the new panel overflowed the window I
+pinned the board to the viewport with `overflow: hidden`, and my check — `scrollHeight ===
+innerHeight` — went green. It was green because the layout was *amputated*: two panels were not
+merely off-screen but unreachable. A screenshot showed it in one second. Verify the artifact,
+not the proxy.
 
 **Diagnose the account, not the code.** I lost real hours assuming Bedrock was a permissions or
 model-access problem. The thing that actually resolved it was reading 1,123 service quotas and

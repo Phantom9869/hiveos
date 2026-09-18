@@ -1,14 +1,16 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 
 import { useHive } from './useHive'
 import {
   ActivityPanel,
+  CanvasPanel,
   Mark,
   QueuePanel,
   QuotaPanel,
   MemoryPanel,
   SlotsPanel,
   StatusRail,
+  ToastStack,
   formatEta,
 } from './components'
 
@@ -19,6 +21,7 @@ const STORAGE_KEY = 'hiveos.identity'
 // keeps what you typed and what arrives the same thing.
 const MAX_USER_ID = 40
 const MAX_PROMPT = 2000
+const MAX_TEXT = 500
 
 function loadIdentity() {
   try {
@@ -194,11 +197,58 @@ function RequestPanel({ hive }) {
   )
 }
 
+/* --- Team chat ------------------------------------------------------------ */
+
+/* Plain human chat, not the agent. `send_message` has existed since Phase 1
+ * and was broadcast to every client, but no UI ever sent one — the activity
+ * log could render a `chat_message` that nothing could produce. */
+function ChatComposer({ hive }) {
+  const [text, setText] = useState('')
+  const disabled = hive.connection !== 'open'
+
+  const submit = (event) => {
+    event.preventDefault()
+    const message = text.trim().slice(0, MAX_TEXT)
+    if (!message || disabled) return
+    if (hive.sendMessage(message)) setText('')
+  }
+
+  return (
+    <form className="chat" onSubmit={submit}>
+      <input
+        className="field"
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        maxLength={MAX_TEXT}
+        placeholder="Say something to the team"
+        aria-label="Message the team"
+        autoComplete="off"
+      />
+      <button className="btn btn--ghost" type="submit" disabled={disabled || !text.trim()}>
+        Send
+      </button>
+    </form>
+  )
+}
+
 /* --- Workspace ------------------------------------------------------------ */
 
 function Workspace({ identity }) {
   const hive = useHive(identity)
   const { board } = hive
+
+  // Who is mid-task, so the floor can mark them working. Derived from the slot
+  // table rather than tracked separately — the slots are the authority on who
+  // holds an agent, and a second source would be one more thing to drift.
+  const busyUsers = useMemo(
+    () =>
+      new Set(
+        board.agents
+          .filter((a) => a.status === 'BUSY' && a.current_user)
+          .map((a) => a.current_user),
+      ),
+    [board.agents],
+  )
 
   if (hive.configError) {
     return (
@@ -232,15 +282,32 @@ function Workspace({ identity }) {
         estimated={hive.usageEstimated}
       />
 
-      <SlotsPanel agents={board.agents} me={identity.userId} />
-      <QueuePanel queue={board.queue} me={identity.userId} />
+      <CanvasPanel
+        members={board.members}
+        me={identity.userId}
+        busyUsers={busyUsers}
+        onMove={hive.moveAvatar}
+      />
 
-      {/* Only once there is something to show — an empty panel is dead space
-          on the recording, and it appears on its own when memory lands. */}
-      {board.memory.length > 0 && <MemoryPanel memory={board.memory} />}
+      <SlotsPanel agents={board.agents} me={identity.userId} />
+
+      {/* Two short lists side by side rather than two sparse full-width rows.
+          Together they cost one panel's height instead of two, which is what
+          makes room for the workspace floor above without pushing the request
+          form off a 640x950 window. The memory panel appears only once there
+          is a fact, so the queue takes the full width until then. */}
+      <div className="duo">
+        <QueuePanel queue={board.queue} me={identity.userId} />
+        {board.memory.length > 0 && <MemoryPanel memory={board.memory} />}
+      </div>
 
       <RequestPanel hive={hive} />
-      <ActivityPanel activity={hive.activity} />
+
+      <ActivityPanel activity={hive.activity}>
+        <ChatComposer hive={hive} />
+      </ActivityPanel>
+
+      <ToastStack toasts={hive.toasts} />
     </div>
   )
 }

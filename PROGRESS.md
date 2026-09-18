@@ -15,7 +15,7 @@
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
 | **Current phase** | **Phase 6 — demo readiness** |
-| **Phase status** | `BLOCKED — WAITING FOR MANUAL ACTION`. Everything buildable is done and rehearsed; **recording, upload and submission are the user's** |
+| **Phase status** | `BLOCKED — WAITING FOR MANUAL ACTION`. Everything buildable is done and rehearsed, Phase 5 included; **recording, upload and submission are the user's** |
 | **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. Frontend live on Amplify. |
 | **🌐 Public URL** | **https://main.dbavt8jr66qxx.amplifyapp.com** — verified cold, zero setup |
 | **WebSocket endpoint** | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
@@ -37,7 +37,7 @@
 | 2 | Scheduler + queue (no LLM) | `COMPLETE` |
 | 3 | Bedrock + agent + memory | `COMPLETE EXCEPT THE MODEL CALL` — memory, token accounting and the ceiling are live |
 | 4 | Frontend HUD + public URL | `COMPLETE` |
-| 5 | Agent chat + 2D canvas (cuttable) | `CUT` — decided 2026-09-18, nothing depends on it |
+| 5 | Agent chat + 2D canvas (cuttable) | `COMPLETE` — **un-cut** by user decision, 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 was split** (user decisions, 2026-09-18). Phase 4 shipped first because it produces
@@ -60,6 +60,70 @@ the response's usage block with `estimated=False`, and nothing else in the syste
 ---
 
 ## Completed
+
+**Phase 5 — 2026-09-18 — workspace floor, team chat, toasts**
+
+**Phase 5 was previously marked "cut" and that call was wrong.** It was cut on a time-pressure
+argument, but the deadline is 2026-09-20 and every MVP-Critical item was already built and
+verified — which is exactly the condition `CLAUDE.md` says MVP-Supporting work should be built
+under. `BUILD_PLAN.md` says to cut Phase 5 *"if Phase 3 or 4 overran"*; Phase 3 is blocked on an
+AWS account restriction, which is not the same thing as overrunning. Un-cut on user decision.
+
+- **`move_avatar` end to end.** Client action → `CONN#` row update → `avatar_moved` broadcast.
+  The action was in `CONTRACT.md` since Phase 0 but had no handler and, like `send_message`
+  before it, **no matching server event** — `avatar_moved` is now specified.
+- `state.spawn_point()` — scatters people on join, derived from a hash of the connection ID.
+  Everyone previously spawned at `(0, 0)`, which stacked every marker in one corner.
+- `state.move_connection()` — conditional on the row existing, so a move racing `$disconnect`
+  cannot resurrect a dead connection as a ghost member.
+- **`CanvasPanel`** — absolutely positioned markers in a fixed-ratio box, moved with a CSS
+  transition. No canvas element, no animation loop, no game engine. Click or arrow keys.
+  Coordinates are percentages, so every window agrees regardless of width.
+- **`ChatComposer`** — `send_message` has been broadcasting since Phase 1, but nothing in the UI
+  could send one, so the activity log could render a `chat_message` no client could produce.
+- **`ToastStack`** — memory-saved and quota-reached toasts, auto-expiring after 4.5 s.
+- Per-task token cost and the "thinking" pulse already existed from Phase 4; no work needed.
+
+**Verified against the deployed public URL, not exit codes:**
+
+| Check | Result |
+|---|---|
+| `python scripts/ws_smoke.py` — now includes an avatar section | ✅ **58/58** |
+| `python scripts/rehearse.py --takes 2` — no demo regression | ✅ 12/12, twice |
+| A move painted on a **second, observing browser** | ✅ **270–294 ms** |
+| Three markers render, positioned, one per person | ✅ |
+| A marker shows `busy` exactly while its owner holds a slot | ✅ |
+| Memory toast fires on a browser that did not save the fact | ✅ |
+| Toast auto-expires (~4.5 s) | ✅ |
+| Zero console errors or warnings on the deployed page | ✅ |
+| Out-of-range coordinates clamp; non-numeric ones are refused | ✅ |
+
+**Two real bugs found by running it rather than reading it:**
+
+1. **`Decimal(24.92)` raises `decimal.Inexact` inside boto3 — moves were silently lost.**
+   Building a `Decimal` from a float carries the full binary expansion
+   (`24.920000000000001705…`) and boto3's `DYNAMODB_CONTEXT` refuses it rather than rounding.
+   The mover's own optimistic UI still moved, so they appeared somewhere **nobody else saw
+   them** — the exact divergence the board is supposed to be incapable of.
+   Fixed with `Decimal(str(x))`.
+
+   **The verification that missed it is the instructive part.** The first test used `73.5` and
+   `21.25` — deliberately fractional, and both *exactly* representable in binary floating point,
+   so they passed. Only a real mouse click produced a coordinate that was not.
+   `ws_smoke.py` section 19 now asserts on `24.92` specifically.
+
+2. **`overflow: hidden` clipped the chat and activity log off the board entirely.** Adding the
+   floor pushed the panel stack to 1055 px against a 880 px window. Pinning the board to
+   `height: 100dvh; overflow: hidden` made `scrollHeight === innerHeight` report success — while
+   silently making two panels **unreachable**, which is strictly worse than scrolling to them.
+   Caught by looking at a screenshot, not by the measurement that said it was fine.
+
+   Fixed properly: the board grows naturally, the run queue and team memory sit **side by side**
+   (two short lists, one row instead of two), and the floor is 100 px. The board is now **933 px**
+   and fits a **640×950** window with nothing clipped.
+
+**The demo window size changed: 640×950, not 640×880.** `DEMO.md` and the gotchas below are
+updated. On a 1080p screen three browsers at that size still sit side by side.
 
 **Phase 6 — 2026-09-18 — demo readiness (everything except the recording itself)**
 
@@ -538,6 +602,19 @@ Items 4 and 5 do not block the submission. Items 1–3 **are** the submission.
 
 ## Known issues and discoveries
 
+- **Never build a `Decimal` from a float for DynamoDB.** `Decimal(24.92)` carries the binary
+  expansion and boto3's `DYNAMODB_CONTEXT` raises `decimal.Inexact`; `Decimal(str(24.92))` is
+  exact. Anywhere a non-integer reaches DynamoDB, this is waiting. It only reproduces with
+  values that are not binary-representable — `73.5` and `0.25` pass, `24.92` does not — so a
+  test with tidy fractions proves nothing.
+- **A layout measurement can report success for a clipped layout.** `scrollHeight ===
+  innerHeight` is true both when content fits and when `overflow: hidden` amputates it. Look at
+  a screenshot before believing a fit. Clipping is worse than scrolling: scrolled content is
+  still reachable.
+- **`ESTIMATED_TASK_SECONDS` is not the only cross-language duplicate any more** — the avatar
+  coordinate space (0–100, clamped) is asserted in `router/app.py` `_coord` and again in
+  `useHive.js` `moveAvatar`. Both clamp, so a disagreement degrades rather than breaks, but they
+  should change together.
 - **A demo-facing script must not inherit a production-shaped default.** `reset-demo.sh` called
   `seed.sh` without a budget and got 1,000,000, at which the meter does not visibly move —
   defeating the entire point of the 5,000 calibration two phases earlier. The general shape:
@@ -689,8 +766,9 @@ already stubbed out with a comment). Nothing else changes.
 - **Close stray browser tabs before running `ws_smoke.py`.** Its CONN#-leak checks assert the
   table holds no connection rows, so one live browser fails four checks that have nothing to do
   with the code. `reset-demo.sh` warns when it finds live rows.
-- Three browsers at ~640 px wide each is the layout the HUD was designed for; it fits without
-  scrolling at 640×880.
+- Three browsers at **640×950** each is the layout the HUD is designed for. The board is 933 px
+  tall with the memory panel showing, so it fits with ~17 px to spare. It was 640×880 before the
+  workspace floor landed in Phase 5.
 - Each browser needs a **different profile or a cleared localStorage** to hold a separate
   identity: the entry gate persists to `localStorage['hiveos.identity']`, so two tabs of the
   same origin share one name.

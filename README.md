@@ -20,8 +20,9 @@ Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 - A freed slot **auto-dispatches** the next queued task
 - Agents share **team memory** — a fact saved by one member is known to the next member's agent
 - The budget is an **enforced ceiling**, not a gauge — the server refuses to spend past it
+- A shared **workspace floor** shows who is present and who is mid-task, live on every screen
 
-**Status.** Everything above is live, deployed and verified against real AWS (49/49 end-to-end
+**Status.** Everything above is live, deployed and verified against real AWS (58/58 end-to-end
 checks — `scripts/ws_smoke.py`), with one honest exception:
 
 > **The agent behind the slots is a stub.** Amazon Bedrock is blocked by an account-level quota
@@ -125,7 +126,7 @@ Verify the deployed backend actually behaves — two live clients, fan-out, and 
 ```bash
 pip install websockets
 ./scripts/reset-demo.sh               # clean board, SQS drained, Lambdas warm — and verified
-python scripts/ws_smoke.py            # 49 checks: backbone, scheduler, memory, ceiling
+python scripts/ws_smoke.py            # 58 checks: backbone, scheduler, memory, ceiling, avatars
 python scripts/rehearse.py --takes 2  # the recorded demo sequence, 12 checks, unattended
 ```
 
@@ -150,7 +151,7 @@ backend/
   shared/memory.py Team memory — MEMORY# rows, context loading, memory_updated
 frontend/
   src/useHive.js   WebSocket client — owns all board state, reconnect, re-sync
-  src/components.jsx  Quota strip, slot cards, run queue, activity log
+  src/components.jsx  Quota strip, slot cards, run queue, workspace floor, toasts, activity log
   src/App.jsx      Entry gate, request form, board layout
 scripts/           Seeding, demo reset, smoke test, demo rehearsal, frontend deploy
 template.yaml      SAM — all AWS infrastructure
@@ -160,9 +161,9 @@ template.yaml      SAM — all AWS infrastructure
 
 ## Current MVP scope
 
-**Built and deployed:** shared token meter · agent slots · FIFO queue with live position · auto-dispatch · shared team memory · enforced budget ceiling · public URL.
+**Built and deployed:** shared token meter · agent slots · FIFO queue with live position · auto-dispatch · shared team memory · enforced budget ceiling · shared workspace floor · team chat · public URL.
 
-**Not built:** the Bedrock model call (account-blocked, see Status) and the 2D avatar canvas (cut — `BUILD_PLAN.md` Phase 5).
+**Not built:** the Bedrock model call (account-blocked, see Status).
 
 **Deliberately excluded:** authentication, multiple teams, game-engine graphics, token-level preemption, calendar/email integrations. See `PRD.md` and `ARCHITECTURE.md` for why.
 

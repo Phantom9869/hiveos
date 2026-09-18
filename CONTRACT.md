@@ -141,12 +141,18 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 | `hello` | — | Reply `state_snapshot` to this connection only. Sent once, immediately after the socket opens |
 | `claim_agent` | `{agent_type, prompt, user_id}` | Try atomic claim → dispatch to SQS, or enqueue and return position |
 | `release_agent` | `{agent_type, user_id}` | Set slot `IDLE`, dispatch the oldest queued task |
+| `send_message` | `{text}` | Broadcast to team chat as `chat_message` |
+| `move_avatar` | `{x, y}` | Update `CONN#` row, broadcast `avatar_moved` |
 
 **`agent_type` on `claim_agent` is a preference, not a reservation.** It is tried first, then the remaining slots in `SLOTS` order. Nobody queues behind an idle agent.
 
 **One active task per user.** A `claim_agent` from a user who already holds a slot or sits in the queue is refused with `error`. Without it a double-clicked button lets one person hold both slots — precisely the monopoly the product claims to prevent.
-| `send_message` | `{user_id, text}` | Broadcast to team chat |
-| `move_avatar` | `{user_id, x, y}` | Update `CONN#` row, broadcast position |
+
+**Neither `send_message` nor `move_avatar` takes a `user_id`.** It is resolved from the sender's `CONN#` row, because a frame is whatever the client chose to type and the row is what `$connect` actually recorded — trusting the frame would let any client move someone else's avatar or speak as them. (This table previously listed `user_id` on both; the handlers never read it.)
+
+**Avatar coordinates are percentages of the canvas (0–100), not pixels.** Three browsers at different widths have to agree on where everyone is standing, and a pixel coordinate breaks that on the first mismatched window. The Router clamps to the range and rejects non-numeric values, so a hand-crafted frame cannot push an avatar off the board for everyone else.
+
+**A position is stored per connection but drawn per user.** The `CONN#` row carries `x`/`y`, so someone with two tabs open has two stored positions — but `state_snapshot.members[]` carries no `connection_id` (deliberately: it is an internal address used only by `post_to_connection`, and broadcasting it to every client buys nothing). The frontend therefore dedupes `members[]` by `user_id` for both the count and the canvas, and `avatar_moved` is keyed by `user_id`, so a second tab moves the same avatar. One person, one marker, which is also the reading that makes sense on a team board.
 
 ### Server → client
 
@@ -162,6 +168,7 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 | `budget_exhausted` | `{tokens_used, token_budget}` | Bedrock invocation refused at the ceiling |
 | `user_joined` | `{user_id, avatar, x, y}` | `$connect` |
 | `user_left` | `{user_id}` | `$disconnect` or `GoneException` |
+| `avatar_moved` | `{user_id, x, y}` | `move_avatar` runs |
 | `error` | `{message}` | Any handled failure worth surfacing |
 
 `queue[]` entries are `{user_id, agent_type, queue_position}`, oldest first, `queue_position` 1-based.

@@ -27,6 +27,17 @@ const RESYNC_DELAY_MS = 500
 const BACKOFF_MS = [1000, 2000, 4000, 8000]
 const MAX_ACTIVITY = 60
 
+/** Floor between outbound `move_avatar` frames. A held arrow key repeats at
+ *  the OS rate (~30/s), and every frame is a WebSocket send plus a DynamoDB
+ *  write plus a fan-out to every member. The trailing send below guarantees
+ *  the final resting position still goes out, so throttling costs nothing but
+ *  intermediate frames nobody would have seen at 150 ms of CSS transition. */
+const MOVE_THROTTLE_MS = 100
+
+/** How long a memory toast stays up. Long enough to read a short fact on a
+ *  recording, short enough that it is gone before the next beat. */
+const TOAST_MS = 4500
+
 /** Events that can move the slot table, the queue or the member list, and
  *  therefore warrant an authoritative re-read. `state_snapshot` is
  *  deliberately absent — including it would make the re-sync feed itself. */
@@ -39,6 +50,12 @@ const RESYNC_EVENTS = new Set([
   // re-sync is what makes it right again.
   'user_joined',
   'user_left',
+  // Any rejected action means the client just applied something optimistically
+  // that the server did not accept — a failed `move_avatar` leaves your marker
+  // somewhere nobody else can see it, which is precisely the divergence the
+  // board is supposed to be incapable of. Re-reading is the cheap way to make
+  // every optimistic update self-correcting.
+  'error',
 ])
 
 const EMPTY_BOARD = {
@@ -191,6 +208,22 @@ export function applyFrame(board, frame) {
         members: board.members.filter((m) => m.user_id !== frame.user_id),
       }
 
+    /* Keyed by user_id, not connection: `members[]` carries no connection_id
+     * (CONTRACT.md), so one person is one marker and a second tab moves the
+     * same one. Ignored for someone not on the board — a move from a user we
+     * have not seen join would otherwise add a member with no avatar. */
+    case 'avatar_moved': {
+      if (!frame.user_id) return board
+      return {
+        ...board,
+        members: board.members.map((m) =>
+          m.user_id === frame.user_id
+            ? { ...m, x: Number(frame.x) || 0, y: Number(frame.y) || 0 }
+            : m,
+        ),
+      }
+    }
+
     default:
       return board
   }
@@ -242,8 +275,30 @@ export function useHive(identity) {
   // partly estimated for the rest of the session and must keep saying so.
   const [usageEstimated, setUsageEstimated] = useState(false)
 
+  const [toasts, setToasts] = useState([])
+
   const socketRef = useRef(null)
   const resyncRef = useRef(null)
+  const moveRef = useRef({ last: 0, timer: null, pending: null })
+  const toastTimers = useRef(new Set())
+
+  const pushToast = useCallback((toast) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    setToasts((prev) => [...prev, { ...toast, id }])
+    const timer = setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id))
+      toastTimers.current.delete(timer)
+    }, TOAST_MS)
+    toastTimers.current.add(timer)
+  }, [])
+
+  useEffect(
+    () => () => {
+      for (const timer of toastTimers.current) clearTimeout(timer)
+      toastTimers.current.clear()
+    },
+    [],
+  )
 
   const scheduleResync = useCallback(() => {
     clearTimeout(resyncRef.current)
@@ -272,6 +327,25 @@ export function useHive(identity) {
 
       if (frame.event === 'budget_exhausted') setBudgetExhausted(true)
 
+      // Toasts are for the two things that happen to the *team* rather than to
+      // you, and that you would otherwise only notice by watching a panel you
+      // were not looking at.
+      if (frame.event === 'memory_updated' && frame.key) {
+        pushToast({
+          kind: 'memory',
+          title: 'Team memory updated',
+          text: `${frame.key} — ${frame.val}`,
+          who: frame.updated_by,
+        })
+      }
+      if (frame.event === 'budget_exhausted') {
+        pushToast({
+          kind: 'alarm',
+          title: 'Token quota reached',
+          text: 'HiveOS refused the request — no model call was made.',
+        })
+      }
+
       // `estimated` rides on token_update / agent_response; `usage_estimated`
       // is the same fact on the snapshot, which is the only way a client that
       // loaded cold can learn it. Sticky either way — never cleared, because
@@ -282,9 +356,14 @@ export function useHive(identity) {
         setBudgetExhausted(budget > 0 && (frame.tokens_used ?? 0) >= budget)
       }
 
+      // `avatar_moved` is deliberately NOT in RESYNC_EVENTS. It is the only
+      // high-frequency event in the protocol, and re-reading the whole board
+      // after each one would turn a walk across the canvas into a burst of
+      // snapshot queries. Nothing else depends on a position, so drift here
+      // costs nothing and is corrected by the next real re-sync anyway.
       if (RESYNC_EVENTS.has(frame.event)) scheduleResync()
     },
-    [scheduleResync],
+    [scheduleResync, pushToast],
   )
 
   useEffect(() => {
@@ -348,6 +427,8 @@ export function useHive(identity) {
     return true
   }, [])
 
+  const me = identity?.userId
+
   const requestAgent = useCallback(
     (prompt, agentType) =>
       send({
@@ -369,9 +450,70 @@ export function useHive(identity) {
     [send, identity],
   )
 
+  const sendMessage = useCallback((text) => send({ action: 'send_message', text }), [send])
+
+  /** Move this client's avatar, throttled, with a guaranteed trailing send.
+   *
+   *  The optimistic local apply is what makes the canvas feel immediate: the
+   *  server echo is ~150-300 ms away, and waiting for it makes your own marker
+   *  lag your cursor. Everyone else's marker moves only on the echo, which is
+   *  the authoritative position.
+   */
+  const moveAvatar = useCallback(
+    (x, y) => {
+      const clamped = {
+        x: Math.round(Math.max(0, Math.min(100, x)) * 100) / 100,
+        y: Math.round(Math.max(0, Math.min(100, y)) * 100) / 100,
+      }
+
+      if (me) {
+        setBoard((prev) => ({
+          ...prev,
+          members: prev.members.map((m) =>
+            m.user_id === me ? { ...m, ...clamped } : m,
+          ),
+        }))
+      }
+
+      const state = moveRef.current
+      const now = Date.now()
+      const flush = () => {
+        state.last = Date.now()
+        state.timer = null
+        const next = state.pending
+        state.pending = null
+        if (next) send({ action: 'move_avatar', ...next })
+      }
+
+      if (now - state.last >= MOVE_THROTTLE_MS && !state.timer) {
+        state.last = now
+        send({ action: 'move_avatar', ...clamped })
+        return true
+      }
+
+      // Inside the window: remember the newest position and make sure exactly
+      // one trailing send is scheduled. Without this the last move of a drag
+      // or a key-repeat is dropped and your avatar ends up somewhere nobody
+      // else sees it.
+      state.pending = clamped
+      if (!state.timer) {
+        state.timer = setTimeout(flush, MOVE_THROTTLE_MS - (now - state.last))
+      }
+      return true
+    },
+    [send, me],
+  )
+
+  useEffect(
+    () => () => {
+      clearTimeout(moveRef.current.timer)
+      moveRef.current.timer = null
+    },
+    [],
+  )
+
   // Derived exactly the way the Router derives it in `_already_working`, so
   // the button disables for precisely the cases the server would refuse.
-  const me = identity?.userId
   const holding = useMemo(
     () => board.agents.find((a) => a.status === 'BUSY' && a.current_user === me) ?? null,
     [board.agents, me],
@@ -385,13 +527,17 @@ export function useHive(identity) {
     connection,
     board,
     activity,
+    toasts,
     budgetExhausted,
     usageEstimated,
     holding,
     queued,
+    me,
     working: Boolean(holding || queued),
     requestAgent,
     releaseAgent,
+    sendMessage,
+    moveAvatar,
     configError: WS_URL ? null : 'VITE_WS_URL was not set at build time.',
   }
 }
