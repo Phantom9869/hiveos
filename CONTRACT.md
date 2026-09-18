@@ -83,6 +83,15 @@ Table `hiveos-state` · PK `PK` (string) · SK `SK` (string) · on-demand billin
 - **CONN#** — one per live WebSocket connection. Deleted on `$disconnect` **and** on any `GoneException` during broadcast. **One row per connection, not per user** — the same `user_id` with two tabs open has two rows, so `state_snapshot.members[]` can contain duplicates. `user_left`, by contrast, carries only a `user_id`, so a client that trusts it blindly removes someone who still has a live socket. The frontend dedupes `members[]` by `user_id` and re-syncs on both membership events.
 - **AGENT#** — one per slot. `IDLE → BUSY` on claim, `BUSY → IDLE` on completion. `current_user` is `null` when `IDLE`.
 - **QUEUE#** — sorted lexicographically by SK, which gives FIFO because the timestamp leads. Deleted when dispatched. The timestamp is **microsecond** precision (`%Y-%m-%dT%H:%M:%S.%fZ`), not the second-precision `now_iso()` used everywhere else: at second granularity two people clicking within the same second tie and fall back to UUID order, i.e. random. `connection_id` is carried so the runner can reply directly to the requester once the task finally starts.
+- **TASK#** — the ledger: one row per task that reached the runner, including
+  the ones that never ran. `status` is `done`, `failed` or `refused`; a refused
+  task records **zero** tokens, which is the clearest evidence that the ceiling
+  is a control and not a gauge. Sort key is microsecond-precision for the same
+  reason `QUEUE#` is: at second granularity two tasks finishing together tie
+  and fall back to UUID order, i.e. random. Cleared by `seed.sh` — the spend
+  breakdown aggregates every row, so stale rows would open the board showing a
+  team that had already spent its budget.
+
 - **MEMORY#** — key/value facts saved by agents. No expiry in the MVP.
 
   **The SK is derived from the key, not a UUID** (`memory._slug`: lowercased,
@@ -173,7 +182,7 @@ Both are optional. A missing `user_id` becomes `guest-<first 6 chars of connecti
 
 | `event` | Payload | Sent when |
 |---|---|---|
-| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, usage_estimated, members[], memory[], queue[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
+| `state_snapshot` | `{team, agents[], tokens_used, token_budget, pct_used, usage_estimated, members[], memory[], queue[], history[], spend[]}` | In reply to `hello` — a new client must be able to render everything from this one frame |
 | `chat_message` | `{user_id, text, ts}` | `send_message` runs. `user_id` is resolved from the sender's `CONN#` row, not trusted from the frame |
 | `agent_state_update` | `{agent_type, status, current_user, slot_id}` | Any slot state change |
 | `token_update` | `{tokens_used, token_budget, pct_used, estimated}` | After every agent call that spent tokens |
@@ -211,6 +220,22 @@ Two consequences anyone touching the protocol must know:
 2. **`state_snapshot` must never be in the re-sync trigger set** — it would feed itself.
 
 **`state_snapshot` is load-bearing.** A client joining mid-demo must render correct state from it alone, without waiting for the next incremental event. `queue[]` exists for exactly this reason: a user who reconnects while waiting would otherwise have no way to learn their own position until somebody else's action happened to move the queue.
+
+### `history[]` and `spend[]`
+
+Both are derived from `TASK#` rows and both ride on `state_snapshot`, because
+the client most likely to want *"who spent what"* is the one that just opened
+the public URL.
+
+| Field | Shape | Notes |
+|---|---|---|
+| `history[]` | `{user_id, agent_type, tokens, estimated, status, prompt, at}` | Newest first, capped at 12 — every client parses the snapshot on connect, and nobody reads the 40th most recent task off a board |
+| `spend[]` | `{user_id, tokens, tasks}` | Biggest spender first |
+
+**`spend[]` aggregates every task row, not the twelve in `history[]`.** The
+whole point is the total; a breakdown of only the last twelve would be a
+different and much less useful number. Refusals and failures count as *tasks*
+but not as *spend*, which is what they are.
 
 ### Token provenance — `estimated` / `usage_estimated`
 
@@ -328,13 +353,16 @@ def broadcast_to_team(team_id, payload, apigw, table):
 
 Memory is loaded **before** the model call, not on demand, so a queued user's agent already knows the team's facts the moment it starts.
 
-**`get_task_context` is deliberately not implemented.** It was specified to
-return "the original prompt and relevant prior task history", but no task
-history is stored anywhere — there is no `TASK#` entity, and adding one is
-MVP-Supporting at best (`PRD.md` lists task history under "build if core
-works"). With the prompt already on the SQS message, the tool would return
-nothing a caller does not already have. Build the entity first if this is ever
-wanted.
+**`get_task_context` is still not implemented, but the reason changed.** It was
+specified to return "the original prompt and relevant prior task history", and
+the original objection was that no task history existed anywhere. It does now —
+`TASK#`, above — so the blocker is gone and this is a small tool away from
+being buildable.
+
+It stays unbuilt because the agent has no tools at all yet: memory is loaded
+into the system prompt before the call rather than fetched on demand, and the
+prompt is already on the SQS message. Build it with the rest of the tool
+surface, not before it.
 
 **How a fact gets saved: a prompt convention, not a tool call.** `remember:
 <key> = <value>` (colon optional, case-insensitive), parsed by

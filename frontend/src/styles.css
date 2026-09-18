@@ -1669,6 +1669,72 @@ body {
 }
 
 
+
+/* --- Where it went -------------------------------------------------------- */
+
+.spend {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.spend__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'who figures'
+    'track track';
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.spend__who {
+  grid-area: who;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spend__figures {
+  grid-area: figures;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.spend__tokens {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.spend__tasks {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* Share of the whole budget, so the bars add up to the meter above them
+ * rather than to each other. */
+.spend__track {
+  grid-area: track;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--tick);
+  overflow: hidden;
+}
+
+.spend__fill {
+  display: block;
+  height: 100%;
+  border-radius: 1px;
+  transition: width 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 /* --- Wide screens: the room becomes the room ------------------------------ *
  *
  * Below this width the board stays exactly as it was — a single 760px column,
@@ -1692,12 +1758,13 @@ body {
      * agent output regardless of the viewport — the activity log is prose, and
      * prose that runs the width of a 27" screen is unreadable. */
     grid-template-columns: minmax(0, 1fr) minmax(360px, 46ch);
-    grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto;
     grid-template-areas:
       'rail    rail'
       'quota   quota'
       'floor   request'
       'floor   memory'
+      'floor   spend'
       'floor   activity'
       'members members';
   }
@@ -1707,12 +1774,14 @@ body {
   .panel--floor { grid-area: floor; }
   .panel--request { grid-area: request; }
   .panel--memory { grid-area: memory; }
+  .panel--spend { grid-area: spend; }
   .panel--activity { grid-area: activity; }
   .memberbar { grid-area: members; }
 
   /* The rail needs a left edge; the floor spans the rows beside it. */
   .panel--request,
   .panel--memory,
+  .panel--spend,
   .panel--activity {
     border-left: 1px solid var(--rule);
   }

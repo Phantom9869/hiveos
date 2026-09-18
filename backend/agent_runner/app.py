@@ -30,7 +30,7 @@ import time
 import traceback
 from collections import namedtuple
 
-from shared import broadcast, llm, memory, scheduler, state
+from shared import broadcast, history, llm, memory, scheduler, state
 
 # The floor on how long a task occupies its slot. This pads the *slot*, not the
 # model: the queue mechanic is the thing being demonstrated, and a sub-second
@@ -78,6 +78,14 @@ def _handle(task):
         # through to finally — swallowing it here is what stops SQS from
         # redelivering a task we have already accounted for.
         traceback.print_exc()
+        history.record(
+            task.get("user_id"),
+            task.get("agent_type") or slot_id,
+            tokens=0,
+            estimated=False,
+            status=history.FAILED,
+            prompt=task.get("prompt", ""),
+        )
         _reply_error(task, "agent task failed")
     finally:
         # Deliberately NOT wrapped: if the release itself fails, the slot is
@@ -107,6 +115,17 @@ def _refuse_over_budget(task):
         return False
 
     print(f"[runner] REFUSED — over budget used={used} budget={budget}")
+    # A refusal is part of the record, and the most telling part: it is what
+    # proves the ceiling is a control rather than a gauge. Zero tokens, and
+    # the ledger says so.
+    history.record(
+        task.get("user_id"),
+        task.get("agent_type") or task.get("slot_id"),
+        tokens=0,
+        estimated=False,
+        status=history.REFUSED,
+        prompt=task.get("prompt", ""),
+    )
     broadcast.broadcast_to_team(
         {
             "event": "budget_exhausted",
@@ -230,6 +249,17 @@ def _reply(task, result):
     it describes already-committed state and the meter is the headline number.
     """
     usage = state.add_tokens(result.tokens, estimated=result.estimated)
+
+    # After the ADD, never before: the ledger must not be able to report a cost
+    # that the team counter has not actually taken.
+    history.record(
+        task.get("user_id"),
+        task.get("agent_type") or task["slot_id"],
+        tokens=result.tokens,
+        estimated=result.estimated,
+        status=history.DONE,
+        prompt=task.get("prompt", ""),
+    )
 
     # `usage` already carries `estimated`, read back from the row, so the
     # broadcast reports the provenance of the whole total rather than of this

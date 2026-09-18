@@ -42,9 +42,12 @@ for slot in coder researcher; do
   echo "  AGENT#${slot}$(printf '%*s' $((11-${#slot})) '')IDLE"
 done
 
-# --- clear queue and memory --------------------------------------------------
-# Deletes every QUEUE# and MEMORY# row so a demo starts from a known state.
-for prefix in QUEUE MEMORY; do
+# --- clear queue, memory and task history -------------------------------------
+# Deletes every QUEUE#, MEMORY# and TASK# row so a demo starts from a known
+# state. TASK# matters as much as the others: the spend breakdown is aggregated
+# over every task row, so leaving yesterday's runs behind would have the board
+# open showing a team that had already spent its budget.
+for prefix in QUEUE MEMORY TASK; do
   count=0
   while read -r sk; do
     [ -z "$sk" ] && continue

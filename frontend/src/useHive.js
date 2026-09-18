@@ -67,6 +67,10 @@ const EMPTY_BOARD = {
   members: [],
   memory: [],
   queue: [],
+  // Derived server-side from TASK# rows and carried on the snapshot, so a cold
+  // client gets the whole ledger rather than only what happens after it joins.
+  history: [],
+  spend: [],
 }
 
 function renumber(queue) {
@@ -123,6 +127,8 @@ export function applyFrame(board, frame) {
         members: distinctMembers(frame.members ?? []),
         memory: frame.memory ?? [],
         queue: withEta(frame.queue ?? []),
+        history: frame.history ?? [],
+        spend: frame.spend ?? [],
       }
 
     case 'agent_state_update': {

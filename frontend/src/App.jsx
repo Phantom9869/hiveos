@@ -10,6 +10,7 @@ import {
   QuotaBar,
   MemberBar,
   MemoryPanel,
+  SpendPanel,
   SlotsPanel,
   StatusRail,
   ToastStack,
@@ -299,6 +300,12 @@ function Workspace({ identity }) {
           cost 266px of a viewport the floor needs. `SlotsPanel` and
           `QueuePanel` are still exported; nothing else changed about them. */}
       {board.memory.length > 0 && <MemoryPanel memory={board.memory} />}
+
+      <SpendPanel
+        spend={board.spend}
+        members={board.members}
+        tokenBudget={board.token_budget}
+      />
 
       <RequestPanel hive={hive} />
 

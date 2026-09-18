@@ -268,7 +268,12 @@ def state_snapshot():
     Load-bearing per CONTRACT.md: a browser joining mid-demo must not have to
     wait for the next incremental event to show correct state.
     """
-    metadata, agents, members, memory, waiting = {}, [], [], [], []
+    # Imported here, not at module scope: `history` needs `state` for its
+    # writes, so a top-level import either way is a cycle. Only the two pure
+    # shaping functions are used below, and this is their one caller.
+    from . import history
+
+    metadata, agents, members, memory, waiting, tasks = {}, [], [], [], [], []
 
     for item in query_team():
         sk = item["SK"]
@@ -294,6 +299,8 @@ def state_snapshot():
                     "y": item.get("y", 0),
                 }
             )
+        elif sk.startswith("TASK#"):
+            tasks.append(item)
         elif sk.startswith("MEMORY#"):
             memory.append(
                 {
@@ -324,4 +331,9 @@ def state_snapshot():
         # render its own position until someone else's action happens to move
         # the queue. The snapshot has to stand alone (CONTRACT.md).
         "queue": queue_view(sorted(waiting, key=lambda item: item["SK"])),
+        # The ledger. On the snapshot rather than only on a live event for the
+        # same reason as everything else here: the client most likely to want
+        # "who spent what" is the one that just opened the URL.
+        "history": history.view(tasks),
+        "spend": history.spend(tasks),
     }

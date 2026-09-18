@@ -216,6 +216,65 @@ export function MemberBar({ members, me, busyUsers, queue }) {
   )
 }
 
+
+/* Where the budget actually went.
+ *
+ * The meter says the team has spent 2,214 tokens; this says who spent them.
+ * That difference is the product — a gauge tells you the tank is low, a ledger
+ * tells you who is driving. Derived server-side from TASK# rows and carried on
+ * `state_snapshot`, so a browser opening the URL cold sees the whole history
+ * rather than an empty panel that fills in only if something happens next.
+ */
+export function SpendPanel({ spend, members, tokenBudget }) {
+  if (!spend.length) return null
+
+  // Share of the *budget*, not of the largest spender: the question this panel
+  // answers is "how much of what we have has this person used", and scaling to
+  // the top spender would make one person's small spend look like all of it.
+  const budget = tokenBudget || 0
+  const avatarOf = new Map(members.map((m) => [m.user_id, m.avatar]))
+  const totalTasks = spend.reduce((sum, row) => sum + row.tasks, 0)
+
+  return (
+    <section className="panel panel--spend" aria-labelledby="spend-label">
+      <div className="panel__head">
+        <span className="panel__label" id="spend-label">
+          Where it went
+        </span>
+        <span className="panel__aside">
+          {totalTasks} {totalTasks === 1 ? 'task' : 'tasks'}
+        </span>
+      </div>
+
+      <div className="spend">
+        {spend.map((row) => {
+          const look = lookFor(avatarOf.get(row.user_id), row.user_id)
+          const share = budget ? Math.min(100, (row.tokens / budget) * 100) : 0
+          return (
+            <div className="spend__row" key={row.user_id}>
+              <span className="spend__who">{row.user_id}</span>
+              <span className="spend__figures">
+                <span className="spend__tokens">{NUM.format(row.tokens)}</span>
+                <span className="spend__tasks">
+                  {row.tasks} {row.tasks === 1 ? 'task' : 'tasks'}
+                </span>
+              </span>
+              {/* Their own colour from the floor, so the ledger and the room
+                  are visibly about the same people. */}
+              <span className="spend__track">
+                <span
+                  className="spend__fill"
+                  style={{ width: `${share}%`, background: look.hair }}
+                />
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
 export function SlotsPanel({ agents, me }) {
   const running = agents.filter((a) => a.status === 'BUSY').length
 
