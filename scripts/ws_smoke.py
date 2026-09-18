@@ -423,10 +423,15 @@ async def run_scheduler(url):
     print("\n9. Auto-dispatch when a slot frees — the Phase 2 gate")
     done = await expect(alice, "agent_response", "alice",
                         where=lambda f: f.get("user_id") == "alice")
-    check("alice's stub agent responded", bool(done.get("text")), str(done)[:120])
+    check("alice's agent responded", bool(done.get("text")), str(done)[:120])
+    # Provenance, not a fixed expectation. With a model reachable the count is
+    # what the provider reported (estimated=False); on the fallback path it is
+    # a heuristic (estimated=True). What must hold either way is that the frame
+    # *says which*, so no client can present one as the other.
     check(
-        "the response reports a token cost, flagged estimated while stubbed",
-        done.get("tokens_used_this_call", 0) > 0 and done.get("estimated") is True,
+        "the response reports a token cost and declares its provenance",
+        done.get("tokens_used_this_call", 0) > 0
+        and isinstance(done.get("estimated"), bool),
         f"tokens={done.get('tokens_used_this_call')} estimated={done.get('estimated')}",
     )
 
@@ -591,22 +596,29 @@ async def run_memory_and_budget(url):
         meter.get("tokens_used", 0) > before and meter.get("token_budget") == budget,
         f"{meter.get('tokens_used')}/{meter.get('token_budget')} (was {before})",
     )
+    # `usage_estimated` is sticky (state.add_tokens): once any estimated spend
+    # is folded in, the *total* is partly estimated for as long as it stands.
+    # So a real call need not clear it — but an estimated one must set it.
+    call_estimated = spent.get("estimated")
+    total_estimated = meter.get("estimated")
     check(
-        "token_update is flagged estimated while the agent is stubbed",
-        meter.get("estimated") is True,
-        str(meter.get("estimated")),
+        "an estimated call flags the running total — the flag is sticky",
+        total_estimated is True if call_estimated else isinstance(total_estimated, bool),
+        f"call={call_estimated} total={total_estimated}",
     )
 
-    # The cold-load case: a client that was not watching when the spend
-    # happened must still be told the total is partly estimated.
+    # The cold-load case, and the reason it is a check at all: the flag once
+    # rode only on live token_update frames, so a browser opening the URL for
+    # the first time — every judge — saw an unlabelled number. Cold must agree
+    # with live exactly, whichever way the flag is set.
     cold = await websockets.connect(f"{url}?user_id=cold")
     await cold.send(json.dumps({"action": "hello"}))
     snap = await expect(cold, "state_snapshot", "cold")
     await cold.close()
     check(
-        "a cold client's snapshot also reports the usage as estimated",
-        snap.get("usage_estimated") is True and snap.get("tokens_used", 0) > 0,
-        f"usage_estimated={snap.get('usage_estimated')} used={snap.get('tokens_used')}",
+        "a cold client's snapshot reports the same provenance as the live frame",
+        snap.get("usage_estimated") == total_estimated and snap.get("tokens_used", 0) > 0,
+        f"cold={snap.get('usage_estimated')} live={total_estimated} used={snap.get('tokens_used')}",
     )
     check(
         "pct_used matches tokens_used/token_budget",

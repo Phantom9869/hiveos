@@ -312,14 +312,19 @@ async def run_demo(url):
             )
             # The honesty guard. A judge opening the URL cold is the most
             # likely viewer, and they must not see an estimate presented as
-            # billed usage.
+            # billed usage. Which way this flag falls decides a line of
+            # narration, so it is reported loudly rather than merely asserted
+            # — see DEMO.md, "what to say about the token counts".
             cold = await websockets.connect(f"{url}?user_id=judge")
             cold_snap = await snapshot(cold, "judge")
             await cold.close()
+            estimated = cold_snap.get("usage_estimated")
             check(
-                "a browser opening the URL cold is told the counts are estimates",
-                cold_snap.get("usage_estimated") is True,
-                f"usage_estimated={cold_snap.get('usage_estimated')}",
+                "a browser opening the URL cold is told where the counts came from",
+                isinstance(estimated, bool),
+                "ESTIMATED — the model was unreachable; say so on camera"
+                if estimated
+                else "REAL — provider-reported usage; drop the 'estimates' caveat",
             )
             check(
                 "that cold browser renders the whole board from one frame",
@@ -351,9 +356,8 @@ async def run_ceiling(url):
         with Beat("CEILING BEAT — the quota is a control, not a gauge"):
             # Spend the budget with real tasks, the way it happens on camera:
             # nothing is forced, the meter simply runs out. Looped rather than
-            # assuming one task covers it — the spend is an estimate over the
-            # real strings, so its exact size depends on the stub's wording and
-            # must not be hardcoded here.
+            # assuming one task covers it — the cost of a task depends on what
+            # the model actually returns, so it must not be hardcoded here.
             used, budget = metadata_row()
             for attempt in range(4):
                 if used >= budget:

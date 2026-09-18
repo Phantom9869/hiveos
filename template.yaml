@@ -32,6 +32,21 @@ Parameters:
     Default: 1024
     Description: Per-invocation output cap. Keeps a runaway loop cheap.
 
+  GroqModel:
+    Type: String
+    Default: llama-3.3-70b-versatile
+    Description: >
+      Inference model. Groq retires model names periodically; if calls start
+      failing with model_not_found this is the only thing that changes.
+
+  GroqKeyParam:
+    Type: String
+    Default: /hiveos/groq-api-key
+    Description: >
+      SSM Parameter Store path holding the Groq API key as a SecureString.
+      This is the parameter NAME, not the key — the value is read at runtime
+      and never enters this template, the stack, or the repository.
+
 Globals:
   Function:
     Runtime: python3.13
@@ -201,8 +216,9 @@ Resources:
       FunctionName: hiveos-agent-runner
       CodeUri: backend/            # same package as the Router so `shared` imports work
       Handler: agent_runner.app.lambda_handler
-      # Phase 2 runs a stub agent in ~5s. Sized now for the Phase 3 Bedrock
-      # call so the queue's VisibilityTimeout does not have to change later.
+      # A task is a 4s visible slot floor plus a model call (20s client
+      # timeout), comfortably inside this and inside the queue's 360s
+      # VisibilityTimeout.
       Timeout: 60
       Environment:
         Variables:
@@ -212,6 +228,10 @@ Resources:
           QUEUE_URL: !Ref TaskQueue
           TOKEN_BUDGET: !Ref TokenBudget
           MAX_TOKENS_PER_CALL: !Ref MaxTokensPerCall
+          GROQ_MODEL: !Ref GroqModel
+          # The parameter *name*, not the key. The key is a SecureString read
+          # at runtime, so it never enters this template, the stack, or git.
+          GROQ_KEY_PARAM: !Ref GroqKeyParam
       Events:
         Tasks:
           Type: SQS
@@ -228,13 +248,25 @@ Resources:
             - Effect: Allow
               Action: execute-api:ManageConnections
               Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+        # Read the model API key at runtime. Scoped to the one parameter, so
+        # this grants nothing else in Parameter Store.
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GroqKeyParam}'
 
   # -------------------------------------------------------------------------
-  # PHASE 3 — Bedrock permissions
+  # PHASE 3 — model inference
   #
-  # bedrock:InvokeModel (and InvokeModelWithResponseStream if streaming)
-  # on the Agent Runner role, scoped to the resolved model / inference
-  # profile ARN recorded in CONTRACT.md.
+  # No Bedrock permissions here on purpose. Bedrock is blocked account-wide on
+  # this account (us-east-1, us-west-2 and ap-south-1 all refuse; 42 of 43
+  # per-day token quotas are zero and `adjustable=False`) — see PROGRESS.md.
+  # Inference runs against Groq over HTTPS, so the Agent Runner needs an
+  # outbound call and an SSM read, not an IAM grant on a model.
+  #
+  # If Bedrock is ever unblocked: add bedrock:InvokeModel scoped to the
+  # inference-profile ARN, and swap the body of `shared/llm.py:complete`.
+  # Nothing else in the system changes.
   # -------------------------------------------------------------------------
 
 Outputs:

@@ -1,24 +1,28 @@
 """HiveOS Agent Runner — one SQS message is one agent task on one slot.
 
-The agent itself is still a **stub**: it sleeps, returns composed text, and
-reports an *estimated* token count. Amazon Bedrock is blocked account-wide on
-this AWS account (see PROGRESS.md), not by anything here. `_run_agent` is the
-single seam a real model call drops into; nothing else in this file changes.
+The agent is **real**: `shared/llm.py` calls a model and reports the token
+usage the provider actually counted. Amazon Bedrock is blocked account-wide on
+this AWS account (three regions, both first-party and Marketplace models — see
+PROGRESS.md), so inference calls out to Groq. Every other component — the
+queue, the scheduler, the state, the real-time layer, the hosting — is AWS.
 
-Everything around the stub is real and is what the product actually claims:
+Everything around the model is what the product actually claims:
 
   - team memory is loaded before the task runs, and saved facts broadcast
   - `tokens_used` is incremented atomically and broadcast to every client
   - the budget ceiling is **enforced** — the agent is not invoked at 100%
 
-Two invariants live here:
+Three invariants live here:
 
 1. **The slot is released even when the task fails.** A leaked slot deadlocks
    the workspace, and on a recording that is indistinguishable from the
    product being broken. Hence try/finally, always.
-2. **Every frame carrying a token count sets `estimated`.** While the agent is
-   stubbed the number is a heuristic over real text, not billed model usage,
-   and no client should be able to present it as the latter.
+2. **A token count is only reported as real when a provider counted it.** If
+   the model call fails we still answer, from `_stub_agent`, and that result
+   sets `estimated` — which is sticky on the total (`state.add_tokens`), so a
+   degraded call can never be laundered into a billed-looking meter.
+3. **A task holds its slot for a visible minimum.** The scheduler is the
+   product; a 400 ms call would make BUSY and a queue position illegible.
 """
 
 import json
@@ -26,21 +30,22 @@ import time
 import traceback
 from collections import namedtuple
 
-from shared import broadcast, memory, scheduler, state
+from shared import broadcast, llm, memory, scheduler, state
 
-# The stub's "work". Long enough that a BUSY slot and a queue position are
-# legible on a recording, short enough that the queue still visibly drains
-# inside a 3-minute demo.
-STUB_DELAY_SECONDS = 5.0
+# The floor on how long a task occupies its slot. This pads the *slot*, not the
+# model: the queue mechanic is the thing being demonstrated, and a sub-second
+# response would flash BUSY and free again before either was readable. Sized so
+# a three-deep queue still drains well inside a 3-minute demo.
+MIN_SLOT_SECONDS = 4.0
 
 # Fault injection for the smoke test's no-slot-leak check. The release
 # invariant is the one thing that must never silently regress, so it stays
 # verifiable against deployed AWS rather than only in a local test.
 FAIL_SENTINEL = "__hiveos_fail__"
 
-# The standard rough heuristic for English. Only used while the agent is
-# stubbed; a real Bedrock response reports usage directly and `estimated`
-# becomes False.
+# The standard rough heuristic for English. Used *only* on the fallback path,
+# where no provider counted anything; a real response reports usage directly
+# and `estimated` becomes False.
 CHARS_PER_TOKEN = 4
 
 AgentResult = namedtuple("AgentResult", "text tokens estimated")
@@ -129,46 +134,82 @@ def _estimate_tokens(*texts):
 
 
 def _run_agent(task):
-    """Stub agent. A real Bedrock call replaces this body and nothing else.
+    """Run one task: load the team's memory, call the model, hold the slot.
 
-    When it does, `tokens` comes from the response's usage block and
-    `estimated` becomes False.
+    The model call is the only part that can fail in a way the user should
+    still get an answer from, so it is the only part wrapped. Everything
+    around it — the memory write, the broadcast, the accounting — is the real
+    mechanism and runs whether or not the provider is reachable.
     """
     prompt = task.get("prompt", "")
 
     if FAIL_SENTINEL in prompt:
         raise RuntimeError(f"fault injection via {FAIL_SENTINEL}")
 
+    agent_type = task.get("agent_type") or task["slot_id"]
+    requester = task.get("user_id", "unknown")
+    started = time.monotonic()
+
     # Before the work, not during it: a queued user's agent must already know
     # the team's facts the moment its turn starts (CONTRACT.md).
     context = memory.as_context()
 
-    time.sleep(STUB_DELAY_SECONDS)
-
-    agent_type = task.get("agent_type") or task["slot_id"]
-    requester = task.get("user_id", "unknown")
+    # The save is deterministic and happens first, so the fact is on every
+    # board — and in this call's own context — regardless of what the model
+    # then says about it. `remember()` owns the row and the broadcast.
     saving = memory.directive(prompt)
+    fact = memory.remember(saving[0], saving[1], requester) if saving else None
 
-    if saving:
-        fact = memory.remember(saving[0], saving[1], requester)
+    try:
+        text, tokens = llm.complete(prompt, llm.build_system_prompt(context, fact))
+        result = AgentResult(text=text, tokens=tokens, estimated=False)
+    except Exception as exc:
+        # Answer anyway. A demo that shows an error because a third-party API
+        # blipped is worse than one that answers from composed text and says
+        # so — and `estimated=True` keeps the meter honest about it.
+        print(f"[runner] model call failed ({type(exc).__name__}: {exc}) — composing fallback")
+        result = _stub_agent(prompt, context, agent_type, fact)
+
+    _hold_slot(started)
+    return result
+
+
+def _hold_slot(started):
+    """Keep the slot BUSY long enough to be legible on a recording.
+
+    Padding the slot rather than the model: the queue mechanic is what is being
+    demonstrated, and the scheduler's behaviour is identical either way.
+    """
+    remaining = MIN_SLOT_SECONDS - (time.monotonic() - started)
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def _stub_agent(prompt, context, agent_type, fact):
+    """Composed answer for when the model is unreachable. Always `estimated`.
+
+    This is the fallback ladder's bottom rung (PRD.md) kept live in code rather
+    than as a plan: the workspace degrades to text it composes itself instead
+    of surfacing a provider outage as a broken product.
+    """
+    if fact:
         text = (
-            f"[{agent_type} · stub] Saved for the team: "
+            f"[{agent_type} · offline] Saved for the team: "
             f"{fact['key']} — {fact['val']}. Every agent task from now on "
             "loads this before it starts."
-            if fact
-            else f"[{agent_type} · stub] I could not read a fact out of that."
         )
     elif context:
         text = (
-            f"[{agent_type} · stub] Task accepted: {prompt!r}.\n{context}\n"
+            f"[{agent_type} · offline] Task accepted: {prompt!r}.\n{context}\n"
             "Those facts were loaded before this task began — nobody had to "
-            "repeat them."
+            "repeat them. The model itself is unreachable right now, so this "
+            "reply is composed and its token count is an estimate."
         )
     else:
         text = (
-            f"[{agent_type} · stub] Task accepted: {prompt!r}. Real model "
-            "output arrives once Bedrock is unblocked; the scheduler, queue, "
-            "quota and shared memory around this response are already live."
+            f"[{agent_type} · offline] Task accepted: {prompt!r}. The model is "
+            "unreachable right now, so this reply is composed; the scheduler, "
+            "queue, quota and shared memory around it are live either way."
         )
 
     return AgentResult(
