@@ -74,6 +74,28 @@ def view(rows):
     ]
 
 
+def as_context(limit=8):
+    """Recent tasks as a block a model can read. "" when nothing has run.
+
+    This is what `get_task_context` returns, and the reason CONTRACT.md could
+    finally stop calling that tool unbuildable: it was specified to return
+    prior task history, and until the ledger existed there was none.
+
+    Reads the table itself rather than taking rows, because its caller is a
+    tool invocation deep inside a model round trip and has none to hand.
+    """
+    rows = sorted(state.query_team("TASK#"), key=lambda item: item["SK"], reverse=True)
+    if not rows:
+        return "The team has not run any agent tasks yet."
+
+    lines = [
+        f"- {item.get('user_id')}: {item.get('prompt') or '(no prompt)'}"
+        f" [{item.get('status')}, {int(item.get('tokens', 0))} tokens]"
+        for item in rows[:limit]
+    ]
+    return "Recent agent tasks, newest first:\n" + "\n".join(lines)
+
+
 def spend(rows):
     """Per-person spend, biggest first.
 

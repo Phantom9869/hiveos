@@ -362,31 +362,42 @@ def broadcast_to_team(team_id, payload, apigw, table):
 |---|---|---|
 | `get_team_memory` | `memory.facts()` / `memory.as_context()` | Read all `MEMORY#` rows; return a context block for the system prompt |
 | `set_team_memory` | `memory.remember(key, val, updated_by)` | Upsert a `MEMORY#` row; broadcast `memory_updated` |
-| `get_task_context` | **not built** | See below |
+| `get_task_context` | `history.as_context()` | Recent tasks, who ran them and what each cost — read from `TASK#` |
 
 Memory is loaded **before** the model call, not on demand, so a queued user's agent already knows the team's facts the moment it starts.
 
-**`get_task_context` is still not implemented, but the reason changed.** It was
-specified to return "the original prompt and relevant prior task history", and
-the original objection was that no task history existed anywhere. It does now —
-`TASK#`, above — so the blocker is gone and this is a small tool away from
-being buildable.
+**These are real tools now.** The model is given their schemas and decides
+whether to call them; `llm.complete` runs the loop and the Agent Runner
+executes them. Verified with phrasing the old convention could never have
+matched — *"Please make a note for the whole team that our staging URL is
+staging.hiveos.dev"* — where the model chose `set_team_memory` and extracted
+the key and value itself.
 
-It stays unbuilt because the agent has no tools at all yet: memory is loaded
-into the system prompt before the call rather than fetched on demand, and the
-prompt is already on the SQS message. Build it with the rest of the tool
-surface, not before it.
+**`get_team_memory` is deliberately not a tool.** The team's facts are loaded
+into the system prompt before the call, because *a queued user's agent already
+knows the team's facts the moment its turn starts* is a product claim. As a
+tool it would be conditional on the model remembering to ask, and a model that
+forgot would silently break the demo's strongest beat.
 
-**How a fact gets saved: a prompt convention, not a tool call.** `remember:
-<key> = <value>` (colon optional, case-insensitive), parsed by
-`memory.directive()`. A model given tools would decide to call
-`set_team_memory` itself; this decides for it.
+**One round of tools, not a loop.** Each round is a full round trip inside a
+Lambda holding an agent slot, and an unbounded loop is an unbounded bill. The
+second request is sent without the tool list so the model answers in prose
+rather than calling again.
 
-That is a deliberate remaining gap, and the only place the agent still differs
-in *kind* rather than degree from the Phase 3 design. Tool calling adds a
-second round trip and a failure surface, and was judged not worth it against a
-deadline once the rest was green. Everything the directive then touches — the
-row, the broadcast, the context load on the next task — is the real mechanism.
+**Tokens are summed across every round.** A tool call is two requests, and
+charging for one of them would under-report spend on the one product whose
+entire subject is spend. A task costs roughly 800 tokens with tools, against
+roughly 270 without — the tool schemas ride in every prompt.
+
+**How a fact gets saved: the model decides.** It calls `set_team_memory`, and
+`memory.remember` owns the row and the broadcast exactly as before.
+
+`memory.directive()` — the `remember: <key> = <value>` convention — is still
+there, demoted to a safety net. It runs only when the model did *not* save:
+either it declined, or the call failed outright and there was no model in the
+loop at all. A tool call is a probabilistic act where a regex is not, the
+memory beat is the strongest thing the product does, and the fallback costs one
+match against a string already in hand.
 
 **The save happens before the model call, not after it.** The fact is the
 user's explicit instruction, so it must persist even when the model is

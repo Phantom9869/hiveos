@@ -152,12 +152,33 @@ def _estimate_tokens(*texts):
     return max(1, total // CHARS_PER_TOKEN)
 
 
+def _remember_from_prompt(prompt, requester):
+    """The `remember: k = v` convention, kept as a safety net.
+
+    Saving a fact is now the *model's* decision — it has a `set_team_memory`
+    tool and normally calls it. This runs only when it did not: either the
+    model declined, or the call failed outright and there was no model in the
+    loop at all.
+
+    Worth keeping rather than deleting. The memory beat is the strongest thing
+    the product does, a tool call is a probabilistic act where a regex is not,
+    and this costs one match on a string already in hand.
+    """
+    directive = memory.directive(prompt)
+    if not directive:
+        return None
+    fact = memory.remember(directive[0], directive[1], requester)
+    if fact:
+        print(f"[runner] fell back to the remember: convention for {fact['key']!r}")
+    return fact
+
+
 def _run_agent(task):
-    """Run one task: load the team's memory, call the model, hold the slot.
+    """Run one task: load the team's memory, let the model work, hold the slot.
 
     The model call is the only part that can fail in a way the user should
-    still get an answer from, so it is the only part wrapped. Everything
-    around it — the memory write, the broadcast, the accounting — is the real
+    still get an answer from, so it is the only part wrapped. Everything around
+    it — the memory write, the broadcast, the accounting — is the real
     mechanism and runs whether or not the provider is reachable.
     """
     prompt = task.get("prompt", "")
@@ -170,24 +191,52 @@ def _run_agent(task):
     started = time.monotonic()
 
     # Before the work, not during it: a queued user's agent must already know
-    # the team's facts the moment its turn starts (CONTRACT.md).
+    # the team's facts the moment its turn starts (CONTRACT.md). Deliberately
+    # not a tool — a model that forgot to ask would break that guarantee.
     context = memory.as_context()
 
-    # The save is deterministic and happens first, so the fact is on every
-    # board — and in this call's own context — regardless of what the model
-    # then says about it. `remember()` owns the row and the broadcast.
-    saving = memory.directive(prompt)
-    fact = memory.remember(saving[0], saving[1], requester) if saving else None
+    saved = []
+
+    def run_tool(name, args):
+        """Execute one tool the model chose to call.
+
+        Returns what the model should be *told*, which is not always what
+        happened — a refused save has to come back as prose it can relay,
+        because raising here would abandon a task that has already run.
+        """
+        if name == "set_team_memory":
+            fact = memory.remember(args.get("key"), args.get("value"), requester)
+            if not fact:
+                return "Not saved — a team fact needs both a key and a value."
+            saved.append(fact)
+            return (
+                f"Saved for the team: {fact['key']} = {fact['val']}. "
+                "Every future agent task loads this automatically."
+            )
+        if name == "get_task_context":
+            return history.as_context()
+        return f"There is no tool called {name}."
 
     try:
-        text, tokens = llm.complete(prompt, llm.build_system_prompt(context, fact))
+        text, tokens, called = llm.complete(
+            prompt, llm.build_system_prompt(context), run_tool
+        )
         result = AgentResult(text=text, tokens=tokens, estimated=False)
+        if called:
+            print(f"[runner] model used tools: {called}")
     except Exception as exc:
         # Answer anyway. A demo that shows an error because a third-party API
         # blipped is worse than one that answers from composed text and says
         # so — and `estimated=True` keeps the meter honest about it.
         print(f"[runner] model call failed ({type(exc).__name__}: {exc}) — composing fallback")
+        fact = _remember_from_prompt(prompt, requester)
         result = _stub_agent(prompt, context, agent_type, fact)
+    else:
+        # The model answered but chose not to save, and the prompt plainly
+        # asked. Save it regardless: the fact is what the user asked for, and
+        # the row, the broadcast and the next task's context all follow from it.
+        if not saved:
+            _remember_from_prompt(prompt, requester)
 
     _hold_slot(started)
     return result

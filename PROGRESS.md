@@ -39,6 +39,7 @@
 | 4 | Frontend HUD + public URL | `COMPLETE` |
 | 5 | Agent chat + 2D canvas (cuttable) | `COMPLETE` — **un-cut** by user decision, 2026-09-18 |
 | 7 | Canvas-first pixel workspace | `COMPLETE` — merged, deployed, rehearsed 2026-09-18 |
+| 8 | Depth pass — identity, full screen, ledger, fairness, tools | `COMPLETE` — 2026-09-18 |
 | 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 is complete as of 2026-09-18**, but not as planned — Bedrock was abandoned, not
@@ -63,6 +64,65 @@ the only place the agent differs in *kind* from the Phase 3 design.
 ---
 
 ## Completed
+
+**Phase 8 — 2026-09-18 — identity, full screen, the ledger, fairness, and tools**
+
+Five slices, each deployed and verified before the next. Ordered so the shell
+existed before new panels went into it, and the ledger existed before fairness
+read from it.
+
+1. **Avatar identity (bug).** The marker chosen at the gate was ignored by the
+   floor — sprites came from `index % 3`, so two of four people were identical
+   and *your own character changed when somebody joined*. Now keyed on the
+   marker, which is yours and does not move.
+2. **Full-screen responsive shell.** Above 1100 px the 760 px cap comes off:
+   room left, text rail right, quota top, members bottom. Below it, unchanged —
+   three side-by-side demo windows still work. Widening the room exposed that
+   everything in it was a fixed pixel size, so the floor is now driven by three
+   tokens (`--px-n`, `--furn`, `--tile-size`).
+3. **Task history.** A `TASK#` ledger, written at all three outcomes. A refused
+   task records **zero** tokens — the clearest evidence the ceiling is a control
+   and not a gauge. `history[]` and `spend[]` ride on `state_snapshot`, so a
+   cold client sees the whole ledger.
+4. **Fair queueing.** Dispatch is now least-recently-served first, arrival only
+   as tie-break, read off the ledger. Closes the gap between claiming *fair
+   queueing* and implementing FIFO.
+5. **Model-invoked tools.** `set_team_memory` and `get_task_context` are real
+   tools the model chooses to call.
+
+**Verified against deployed AWS:**
+
+| Check | Result |
+|---|---|
+| `ws_smoke.py` | ✅ **61/61** (was 58 — three fairness checks added) |
+| `rehearse.py --takes 2` | ✅ 12/12, twice |
+| `rehearse.py --ceiling` | ✅ 5/5 — 1744/1600, clamped, nothing spent |
+| Model *decides* to save a fact | ✅ *"Please make a note for the whole team that our staging URL is staging.hiveos.dev"* → `set_team_memory('staging URL', 'staging.hiveos.dev')` |
+| That fact reaches another user's agent | ✅ bob: *"The staging URL is staging.hiveos.dev."* |
+| `get_task_context` | ✅ summarised the ledger back to a third user |
+| Fairness beats FIFO live | ✅ alice queues first, bob shown **and** dispatched first |
+
+**The trap in fairness was not the algorithm.** `state_snapshot` sorted the
+queue by SK *itself*, separately from `queue_view`. Changing dispatch order
+without touching it would have left the board numbering by arrival while the
+runner picked by fairness — position 1 on screen would have been wrong about
+who goes next. One `fair_order`, three consumers.
+
+**A task now costs ~800 tokens, not ~270.** Tool calling is two round trips plus
+the tool schemas in every prompt. Consequences already absorbed: the demo meter
+reaches ~2,250/5000 (45%, was 20%) and `--ceiling` seeds 1600 (was 500). That
+number has now moved three times with the cost of a task; it has to keep
+tracking it or the ceiling beat stops being watchable.
+
+**`get_team_memory` is deliberately not a tool.** Team facts load into the
+system prompt before the call, because *a queued user's agent already knows the
+team's facts the moment its turn starts* is a guarantee. As a tool it would be
+conditional on the model remembering to ask.
+
+**The `remember: k = v` regex survives as a safety net** — it runs only when the
+model did not save, either because it declined or because the provider was
+unreachable. A tool call is probabilistic where a regex is not, and the memory
+beat is the strongest thing the product does.
 
 **Phase 7 — 2026-09-18 — canvas-first pixel workspace (merged and deployed)**
 

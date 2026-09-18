@@ -130,7 +130,9 @@ This runs itself. Alice's task finishes, and three things happen in sequence —
 > never asked twice — and his agent already knows the deploy window. Nobody told it. That's
 > shared memory across a team's agents.
 
-The meter has moved to roughly **980 / 5000** — about 20%, so it is unmistakably visible.
+The meter has moved to roughly **2,250 / 5000** — about 45%, so it is unmistakably visible.
+A task costs more now that the agent has tools: two round trips plus the tool schemas in
+every prompt, roughly 800 tokens against roughly 270 before.
 
 ### 2:15–2:45 · Where AWS fits
 
@@ -165,7 +167,7 @@ Worth 15 seconds if the edit has room. It needs its own near-spent board, so it 
 take** — do not try to reach the ceiling during the main sequence.
 
 ```bash
-TOKEN_BUDGET=500 ./scripts/reset-demo.sh
+TOKEN_BUDGET=1600 ./scripts/reset-demo.sh
 ```
 
 Run two tasks. The second tips the meter over; the next request is **refused before the agent
@@ -175,11 +177,12 @@ is invoked** and `budget_exhausted` goes out team-wide.
 > tokens spent. That's the difference between a quota and a gauge.
 
 The meter displays **100.0%** and **0 remaining**, even though the underlying count overshoots
-(rehearsed at 675 of 500) — a task's cost is only known once it has run, so it cannot be
+(rehearsed at 1744 of 1600) — a task's cost is only known once it has run, so it cannot be
 charged in advance, and the UI clamps. Rehearse it with `python scripts/rehearse.py --ceiling`.
 
-**500, not 60.** 60 was sized for the stub's ~58-token tasks. A real task costs 200–400, so at
-60 the very first one blows straight past the ceiling and the climb never appears on camera.
+**1600, and this number has moved twice.** 60 when the agent was stubbed (~58 a token a task),
+500 once a real model call landed (~200–400), 1600 now the model has tools (~800). It tracks the
+cost of a task; if that changes again, this has to follow or the climb stops being watchable.
 
 ---
 

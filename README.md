@@ -22,7 +22,7 @@ Built for the **First Commit** hackathon (WeMakeDevs × AWS), Ship It track.
 - The budget is an **enforced ceiling**, not a gauge — the server refuses to spend past it
 - A shared **workspace floor** shows who is present and who is mid-task, live on every screen
 
-**Status.** Everything above is live, deployed and verified against real AWS — 58/58 end-to-end
+**Status.** Everything above is live, deployed and verified against real AWS — 61/61 end-to-end
 checks (`scripts/ws_smoke.py`) and the full demo sequence 12/12 twice unattended
 (`scripts/rehearse.py`). The agent is real and the token counts are the provider's reported
 usage, not estimates.
@@ -138,7 +138,7 @@ Verify the deployed backend actually behaves — two live clients, fan-out, and 
 ```bash
 pip install websockets
 ./scripts/reset-demo.sh               # clean board, SQS drained, Lambdas warm — and verified
-python scripts/ws_smoke.py            # 58 checks: backbone, scheduler, memory, ceiling, avatars
+python scripts/ws_smoke.py            # 61 checks: backbone, scheduler, memory, ceiling, avatars, fairness
 python scripts/rehearse.py --takes 2  # the recorded demo sequence, 12 checks, unattended
 ```
 
@@ -173,12 +173,10 @@ template.yaml      SAM — all AWS infrastructure
 
 ## Current MVP scope
 
-**Built and deployed:** shared token meter · agent slots · FIFO queue with live position · auto-dispatch · shared team memory · enforced budget ceiling · shared workspace floor · team chat · public URL.
+**Built and deployed:** shared token meter · agent slots · **fair queueing** with live position · auto-dispatch · shared team memory via **model-invoked tools** · **per-person spend ledger** · enforced budget ceiling · pixel workspace floor · team chat · public URL.
 
-**Not built:** model-decided tool calling — a fact is saved by the `remember: k = v` prompt
-convention rather than the model choosing to invoke `set_team_memory`. Everything it touches —
-the row, the broadcast, the context load on the next task — is the real mechanism. See
-`CONTRACT.md`.
+**Not built:** per-team isolation (one hardcoded team), authentication, and any retention policy
+on the task ledger. See `PRD.md` and `ARCHITECTURE.md` for what was deliberately excluded.
 
 **Deliberately excluded:** authentication, multiple teams, game-engine graphics, token-level preemption, calendar/email integrations. See `PRD.md` and `ARCHITECTURE.md` for why.
 

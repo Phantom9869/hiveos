@@ -56,7 +56,7 @@ Measured against the deployed system, not localhost:
 | A claim reaching a second browser | **282 ms** |
 | Auto-dispatch visible after a slot frees | **187 ms** |
 | An avatar move painted on a second browser | **270–294 ms** |
-| End-to-end checks against real AWS | **58/58** (`scripts/ws_smoke.py`) |
+| End-to-end checks against real AWS | **61/61** (`scripts/ws_smoke.py`) |
 | Rehearsed demo sequence | **12/12**, two consecutive unattended takes (`scripts/rehearse.py`) |
 
 Timings are click-to-paint across two separate browsers — a 20 ms DOM sampler in the *observing*
@@ -138,11 +138,20 @@ During verification I found a real hole in that safeguard: the flag originally r
 unlabelled number. Fixed by persisting the provenance on the metadata row and returning it on
 `state_snapshot`, with a smoke-test check for exactly that case.
 
-**One gap I chose not to close.** A fact is saved by a `remember: key = value` prompt convention
-rather than the model deciding to call `set_team_memory` itself. Tool calling adds a second
-round trip and a failure surface, and with the rest green and a deadline close, it was not worth
-the risk. Everything the convention then touches — the row, the broadcast, the context load on
-the next task — is the real mechanism.
+**The agent has tools and decides to use them.** It calls `set_team_memory` when someone asks it
+to remember something, and `get_task_context` to answer questions about what the team has been
+doing. I tested it with phrasing no convention could have matched — *"Please make a note for the
+whole team that our staging URL is staging.hiveos.dev"* — and the model chose the tool and
+extracted the key and value itself.
+
+The old `remember: key = value` convention is still there as a safety net, for when the model
+declines or the provider is unreachable. A tool call is a probabilistic act where a regex is not,
+and the memory beat is the single strongest thing this product does.
+
+`get_team_memory` is deliberately *not* a tool: team facts are loaded into the system prompt
+before the call, because "a queued user's agent already knows the team's facts the moment its
+turn starts" is a guarantee, and as a tool it would become conditional on the model remembering
+to ask.
 
 ---
 

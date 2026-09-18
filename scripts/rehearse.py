@@ -496,12 +496,16 @@ def main():
     args = parser.parse_args()
 
     url = args.url or stack_output("WebSocketURL")
-    # 500 for the ceiling take. A real task costs roughly 200-400 tokens, so
-    # this lets the meter visibly climb across two tasks and then refuse the
-    # third — the refusal reads as a control rather than an instant wall. Was
-    # 60 while the agent was stubbed, at which a single real task now blows
-    # straight past the ceiling and the climb is invisible.
-    budget = args.budget or (500 if args.ceiling else STANDARD_BUDGET)
+    # 1600 for the ceiling take: the meter climbs across two tasks and refuses
+    # the third, so the refusal reads as a control rather than an instant wall.
+    #
+    # This number tracks the cost of a task and has moved twice with it. 60
+    # while the agent was stubbed (~58 a task), 500 once a real model call
+    # landed (~200-400), and 1600 now that the model has tools — a tool call is
+    # two round trips plus the tool schema in every prompt, which took a task
+    # from roughly 270 tokens to roughly 800. If a task's cost changes again,
+    # this has to follow it or the beat stops being watchable.
+    budget = args.budget or (1600 if args.ceiling else STANDARD_BUDGET)
     beat = run_ceiling if args.ceiling else run_demo
 
     print(f"Endpoint: {url}")

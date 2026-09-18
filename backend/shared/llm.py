@@ -64,6 +64,10 @@ TEMPERATURE = 0.3
 SYSTEM_PROMPT = (
     "You are a shared team agent running inside HiveOS, a workspace where an "
     "entire team draws on one pooled AI token budget.\n"
+    "You have tools. Use set_team_memory whenever someone asks you to "
+    "remember, note or record something for the team — it is shared, so every "
+    "teammate's later tasks will know it. Use get_task_context for questions "
+    "about what the team has been doing or where the budget went.\n"
     "Rules, in order of importance:\n"
     "1. Answer in at most three short sentences. Never exceed this.\n"
     "2. Do not include code blocks, bullet lists, or headings. Prose only.\n"
@@ -91,47 +95,86 @@ def _api_key():
     return _key_cache
 
 
-def build_system_prompt(context, fact=None):
+def build_system_prompt(context):
     """The system prompt: who the agent is, plus what the team already knows.
 
     `context` is the team's shared memory. Loading it *before* the call is the
     product claim — a queued user's agent knows the team's facts the moment its
     turn starts, without anyone repeating them.
+
+    It no longer takes a saved fact. That argument existed to tell the model
+    about a save the *runner* had already performed by regex; the model now
+    makes that decision itself and hears the outcome as a tool result, which is
+    where it belongs.
     """
     parts = [SYSTEM_PROMPT]
     if context:
         parts.append(context)
-    if fact:
-        parts.append(
-            f"You have just saved this fact for the team: "
-            f"{fact['key']} = {fact['val']}. Confirm it in one sentence and "
-            "say that every future task will load it automatically."
-        )
     return "\n\n".join(parts)
 
 
-def complete(prompt, system):
-    """Call the model. Returns (text, tokens) with **real** reported usage.
+# --- Tools -----------------------------------------------------------------
 
-    Raises on any failure — transport, HTTP status, or a response missing the
-    fields we need. The caller owns the fallback, because only the caller knows
-    what a degraded answer should say.
-    """
-    body = json.dumps(
-        {
-            "model": MODEL,
-            "max_tokens": MAX_TOKENS,
-            "temperature": TEMPERATURE,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-        }
-    ).encode("utf-8")
+# What the agent may decide to do, as opposed to what is done *for* it.
+#
+# `get_team_memory` is deliberately absent. The team's facts are loaded into
+# the system prompt before the call, because "a queued user's agent already
+# knows the team's facts the moment its turn starts" is a product claim
+# (CONTRACT.md) — making it a tool would make it conditional on the model
+# choosing to ask, and a model that forgot to ask would silently break the
+# demo's strongest beat.
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "set_team_memory",
+            "description": (
+                "Save a fact for the whole team. Everyone's future agent tasks "
+                "will load it automatically. Use this whenever the user asks "
+                "you to remember, note or record something for the team."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Short name for the fact, e.g. 'deploy window'.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The fact itself, e.g. 'Friday 16:00 UTC'.",
+                    },
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_task_context",
+            "description": (
+                "Look at what the team has recently asked agents to do, and "
+                "what each task cost. Use this for questions about what the "
+                "team has been working on or where the token budget went."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
 
+# One round of tools, not a loop until the model is satisfied. Each round is a
+# full round trip inside a Lambda that holds an agent slot the whole time, and
+# an unbounded loop is an unbounded bill. One round is enough for "save this
+# and tell me you did".
+MAX_TOOL_ROUNDS = 1
+
+
+def _post(payload):
+    """One POST to the provider. Returns the decoded body."""
     request = urllib.request.Request(
         GROQ_URL,
-        data=body,
+        data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {_api_key()}",
             "Content-Type": "application/json",
@@ -143,26 +186,90 @@ def complete(prompt, system):
         },
         method="POST",
     )
-
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            payload = json.load(response)
+            return json.load(response)
     except urllib.error.HTTPError as exc:
         # The body carries the actual reason (bad model name, revoked key,
-        # rate limit). Surfacing it is the difference between a five-minute
-        # fix and an hour of guessing — and it never contains the key, which
-        # rides in the request headers only.
+        # rate limit). Surfacing it is the difference between a five-minute fix
+        # and an hour of guessing — and it never contains the key, which rides
+        # in the request headers only.
         detail = exc.read().decode("utf-8", "replace")[:400]
         raise RuntimeError(f"groq HTTP {exc.code}: {detail}") from exc
 
-    text = (payload["choices"][0]["message"]["content"] or "").strip()
 
-    # Groq reports usage the same way OpenAI does. This is the whole reason the
-    # swap is worth doing: `total_tokens` is what the provider actually
-    # counted, so the meter stops being a heuristic.
-    usage = payload.get("usage") or {}
-    tokens = int(usage.get("total_tokens") or 0)
-    if not text or tokens <= 0:
-        raise RuntimeError(f"groq returned no usable completion: usage={usage}")
+def _usage(payload):
+    return int((payload.get("usage") or {}).get("total_tokens") or 0)
 
-    return text, tokens
+
+def complete(prompt, system, run_tool=None):
+    """Call the model, letting it use tools. Returns (text, tokens, called).
+
+    `run_tool(name, args) -> str` executes one tool and returns what the model
+    should be told about it. `called` is the list of tool names the model
+    actually chose, which the caller needs because a fact saved by the *model*
+    and a fact saved by a regex are different claims and only one of them is
+    "the agent decided to".
+
+    **Tokens are the sum across every round.** A tool call costs two requests,
+    and charging the team for one of them would under-report spend on the one
+    product whose entire subject is spend.
+
+    Raises on any failure — transport, HTTP status, or a response missing the
+    fields we need. The caller owns the fallback, because only the caller knows
+    what a degraded answer should say.
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+    request = {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE,
+        "messages": messages,
+    }
+    if run_tool:
+        request["tools"] = TOOLS
+        request["tool_choice"] = "auto"
+
+    tokens = 0
+    called = []
+
+    for _ in range(MAX_TOOL_ROUNDS + 1):
+        payload = _post({**request, "messages": messages})
+        tokens += _usage(payload)
+        choice = payload["choices"][0]["message"]
+        calls = choice.get("tool_calls") or []
+
+        if not calls or not run_tool:
+            text = (choice.get("content") or "").strip()
+            if not text or tokens <= 0:
+                raise RuntimeError(f"groq returned no usable completion: {payload.get('usage')}")
+            return text, tokens, called
+
+        # The assistant turn that *requested* the tools has to go back verbatim,
+        # or the tool results below have nothing to attach to.
+        messages.append(choice)
+        for call in calls:
+            name = call.get("function", {}).get("name", "")
+            try:
+                args = json.loads(call.get("function", {}).get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            print(f"[llm] model called {name}({args})")
+            called.append(name)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": run_tool(name, args),
+                }
+            )
+
+        # Second round answers in prose; offering the tools again would invite
+        # it to call them forever.
+        request.pop("tools", None)
+        request.pop("tool_choice", None)
+
+    raise RuntimeError("groq kept asking for tools past the round limit")
