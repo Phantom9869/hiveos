@@ -33,6 +33,32 @@
 
   --tick: #222c36;
   --gap: 14px;
+
+  /* Workspace floor.
+   *
+   * All graphite, deliberately. The rule at the top of this file is that
+   * chroma only reports resource state, and a room is the largest surface on
+   * the board — colouring it would quietly outshout the quota strip, which is
+   * the one element that must stay loud. The room gets its character from
+   * pattern and shadow instead, and the only chromatic thing in it is a lit
+   * monitor, which *is* a state report. */
+  --floor: #19212a;
+  --tile: #1d2731;
+  --desk: #2a3542;
+  --desk-edge: #141b22;
+  --screen-off: #10161c;
+  /* The single exception: a plant is not state, but a grey plant reads as a
+   * rendering bug. Desaturated hard enough that it cannot be mistaken for the
+   * jade of a healthy budget. */
+  --foliage: #3d5c48;
+
+  /* Sprite palette. Lives here rather than on `.sprite` because the member bar
+   * draws the same art from a different class — scoping these to `.sprite`
+   * left the chip portraits with undefined colours, so their shadows silently
+   * did not paint at all. Only the hair varies per character; see sprites.js.
+   */
+  --sp-skin: #d9a879;
+  --sp-shirt: #46525f;
 }
 
 * {
@@ -765,17 +791,24 @@ body {
  * would push the quota meter off-screen if it grew. */
 .floor {
   position: relative;
-  /* Sized down from 152px once the panel stack was measured against the 640x880
-   * demo window: the floor is additive, so it is the panel that gives way
-   * rather than the quota meter or the slots. 100px still clears a 28px marker
-   * plus its label with room to move. */
-  height: 100px;
+  /* The room is the hero surface, not a strip between panels. 270px is what a
+   * 9x10 sprite at 4x plus a two-line label needs before desks and people
+   * start colliding; below ~240 the labels overlap at spawn scatter, and above
+   * ~290 the activity log — where the agent's answer appears — drops off a
+   * 640x950 demo window. */
+  height: 270px;
   border: 1px solid var(--rule);
   border-radius: 3px;
-  background:
-    linear-gradient(var(--rule-soft) 1px, transparent 1px) 0 0 / 100% 38px,
-    linear-gradient(90deg, var(--rule-soft) 1px, transparent 1px) 0 0 / 38px 100%,
-    var(--panel-raised);
+  /* Checkerboard tiles. Two graphite shades rather than a colour: the quota
+   * strip is the loud element on this board and a patterned floor competing
+   * with it would cost more than it buys. 24px squares read as tiles at the
+   * width a demo browser is recorded at without turning into noise. */
+  background-image:
+    linear-gradient(45deg, var(--tile) 25%, transparent 25%, transparent 75%, var(--tile) 75%),
+    linear-gradient(45deg, var(--tile) 25%, transparent 25%, transparent 75%, var(--tile) 75%);
+  background-size: 48px 48px;
+  background-position: 0 0, 24px 24px;
+  background-color: var(--floor);
   cursor: crosshair;
   overflow: hidden;
 }
@@ -785,10 +818,14 @@ body {
   outline-offset: 2px;
 }
 
-.pawn {
+/* --- Desks ---------------------------------------------------------------- */
+
+/* A desk is bound to a scheduler slot, so it reports machine state rather than
+ * decorating the room: the monitor lights while that slot is BUSY. That is the
+ * whole point of putting the floor first — "both agents are working" becomes
+ * something you see rather than something you read off a card. */
+.desk {
   position: absolute;
-  /* The coordinate is where the person is, so the marker is centred on it
-   * rather than hanging below and right of it. */
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
@@ -797,22 +834,192 @@ body {
   pointer-events: none;
 }
 
-.pawn__body {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  font-size: 17px;
-  line-height: 1;
-  border: 1px solid var(--rule);
+.desk__surface {
+  position: relative;
+  width: 72px;
+  height: 24px;
+  border-radius: 2px;
+  background: var(--desk);
+  /* A top-down desk needs a front edge or it is just a rectangle. */
+  box-shadow:
+    inset 0 -4px 0 0 var(--desk-edge),
+    0 2px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* Keyboard, on the near edge of the desk where a keyboard actually sits. */
+.desk__keyboard {
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  transform: translateX(-50%);
+  width: 30px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--desk-edge);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+}
+
+.desk__monitor {
+  width: 30px;
+  height: 20px;
+  border-radius: 1px;
+  background: var(--screen-off);
+  box-shadow: inset 0 0 0 2px var(--desk-edge);
+  transition: background 220ms ease, box-shadow 220ms ease;
+}
+
+/* Instrument blue means "consuming a resource" everywhere else on this board.
+ * A lit screen is the same statement, made in the room instead of on a card —
+ * which is the entire argument for putting the floor first. */
+.desk--busy .desk__monitor {
+  background: var(--cool);
+  box-shadow:
+    inset 0 0 0 2px var(--desk-edge),
+    0 0 12px 2px rgba(79, 168, 199, 0.5);
+  animation: screen-flicker 1.6s steps(2, end) infinite;
+}
+
+@keyframes screen-flicker {
+  0% { opacity: 1; }
+  100% { opacity: 0.76; }
+}
+
+/* Chair, seen from above: a seat with a back edge toward the desk. */
+.desk__chair {
+  width: 20px;
+  height: 16px;
+  margin-top: 3px;
+  border-radius: 3px 3px 5px 5px;
+  background: var(--desk-edge);
+  box-shadow: inset 0 3px 0 0 rgba(255, 255, 255, 0.05);
+}
+
+.desk__label {
+  margin-bottom: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  /* The floor is patterned and people walk over it, so the label needs its own
+   * ground to stay readable. */
+  text-shadow: 0 1px 2px var(--ink), 0 0 3px var(--ink);
+}
+
+.desk--busy .desk__label {
+  color: var(--cool);
+}
+
+/* --- Decor ---------------------------------------------------------------- */
+
+/* Corner plants. Positioned clear of both desks and of the spawn scatter, and
+ * kept dim: they are the one element on the board that reports nothing. */
+.decor {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.decor--plant {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Foliage above a pot, so it reads as a plant rather than a dot. The lobes are
+ * three offset shadows — cheaper than an SVG and it matches the chunky
+ * geometry of everything else in the room. */
+.decor__leaves {
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background: var(--panel);
+  background: var(--foliage);
+  box-shadow:
+    -6px 2px 0 -1px var(--foliage),
+    6px 2px 0 -1px var(--foliage),
+    0 7px 0 -2px var(--foliage);
+}
+
+.decor__pot {
+  width: 12px;
+  height: 9px;
+  margin-top: 7px;
+  border-radius: 1px 1px 3px 3px;
+  background: var(--desk);
+  box-shadow: inset 0 -3px 0 0 var(--desk-edge);
+}
+
+/* --- People --------------------------------------------------------------- */
+
+.pawn {
+  position: absolute;
+  /* The coordinate is where the person is, so the marker is centred on it
+   * rather than hanging below and right of it. */
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  pointer-events: none;
+}
+
+/* The sprite is drawn entirely in box-shadow — see sprites.js.
+ *
+ * The element is sized to the finished art (set inline from the same constants
+ * that generate it, so the two can never drift), and a pseudo-element supplies
+ * the single real pixel every shadow is offset from. The first version made
+ * `.sprite` itself that one pixel and clawed the art back over its own centre
+ * with a negative margin — which fought the flex centring and left every
+ * character standing beside its own name label.
+ */
+.sprite {
+  position: relative;
+  /* Pixel art must never be resampled. */
+  image-rendering: pixelated;
+  animation: pawn-idle 2.4s steps(1, end) infinite;
+}
+
+.sprite::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 4px;
+  height: 4px;
+  box-shadow: var(--art);
+}
+
+.sprite--0 { --sp-hair: #7a4b6b; }
+.sprite--1 { --sp-hair: #3f5f6b; }
+.sprite--2 { --sp-hair: #8a5a3c; }
+
+/* Two frames, discretely stepped — pixel art that eases between positions
+ * stops looking like pixel art. A 1px bob at 3x scale is 3 real pixels, which
+ * is visible without becoming a distraction behind a narrator. */
+@keyframes pawn-idle {
+  0%, 50% { transform: translateY(0); }
+  50.01%, 100% { transform: translateY(3px); }
+}
+
+/* Busy is the same two frames, faster — the room reads as working. */
+.pawn--busy .sprite {
+  animation: pawn-busy 0.5s steps(1, end) infinite;
+}
+
+@keyframes pawn-busy {
+  0%, 50% { transform: translateY(0); }
+  50.01%, 100% { transform: translateY(3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sprite,
+  .pawn--busy .sprite,
+  .desk--busy .desk__monitor {
+    animation: none;
+  }
 }
 
 .pawn__name {
-  display: flex;
-  align-items: center;
-  gap: 4px;
   max-width: 88px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -820,31 +1027,169 @@ body {
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.06em;
+  color: var(--dim);
+  /* The floor is patterned, so a label sitting directly on it loses its edges
+   * against the tile boundaries. */
+  text-shadow: 0 1px 2px var(--ink), 0 0 3px var(--ink);
+}
+
+.pawn__state {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
   color: var(--faint);
+  text-shadow: 0 1px 2px var(--ink), 0 0 3px var(--ink);
 }
 
 /* Your own marker is the one you need to find instantly to know that clicking
- * did anything — so it gets the outline, not a colour. */
-.pawn--mine .pawn__body {
-  border-color: var(--text);
+ * did anything. */
+.pawn--mine .pawn__name {
+  color: var(--text);
 }
 
-.pawn--mine .pawn__name {
+.pawn--busy .pawn__state {
+  color: var(--cool);
+}
+
+
+/* --- Quota bar (chrome) --------------------------------------------------- */
+
+.quotabar {
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+.quotabar__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.quotabar__label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--dim);
 }
 
-/* Instrument blue means "consuming a resource" everywhere else on the board;
- * a pawn holding an agent slot is the same statement. */
-.pawn--busy .pawn__body {
-  border-color: var(--cool);
-  box-shadow: 0 0 0 3px rgba(79, 168, 199, 0.16);
+.quotabar__used {
+  margin-left: 2px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1;
 }
 
-.pawn__work {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--cool);
+.quotabar__budget {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.quotabar__pct {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Shorter than the panel's strip, but the same tick geometry — the segments
+ * still have to survive video compression. */
+.quotabar .strip {
+  height: 14px;
+}
+
+.quotabar__note {
+  margin: 7px 0 0;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.quotabar__note--alarm {
+  color: var(--alarm);
+}
+
+/* --- Member bar ----------------------------------------------------------- */
+
+.memberbar {
+  /* Pinned: it is a status bar, so "who is here and what are they doing" has
+   * to be true at a glance without scrolling to it. Sticky rather than fixed
+   * so it stays inside the 760px board column instead of spanning the window.
+   */
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--rule);
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px 5px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--panel-raised);
+  white-space: nowrap;
+}
+
+/* The same sprite art as the floor, at half scale, so the person in the bar
+ * and the person in the room are visibly the same character. `transform` does
+ * the scaling because the art is box-shadow geometry — there is no bitmap to
+ * resample, so this stays crisp. */
+.member__face {
+  position: relative;
+  flex: none;
+  width: 18px;
+  height: 20px;
+}
+
+.member__face::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 4px;
+  height: 4px;
+  box-shadow: var(--art);
+  transform: scale(0.5);
+  transform-origin: 0 0;
+}
+
+.member__name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.member__state {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+
+.member--busy {
+  border-color: rgba(79, 168, 199, 0.5);
+}
+
+.member--busy .member__state {
+  color: var(--cool);
+}
+
+.member--queued .member__state {
+  color: var(--honey);
 }
 
 /* --- Team chat ------------------------------------------------------------ */

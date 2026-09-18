@@ -231,6 +231,66 @@ Fix only what is broken. **Never add features to rescue a demo.**
 
 ---
 
+## Phase 7 — Canvas-first workspace *(added 2026-09-18, user decision)*
+
+**Objective.** Invert the interface hierarchy so the pixel-art office floor is the primary
+surface and the HUD becomes chrome over it. Reference aesthetic: Munder Difflin — pixel art,
+**top-down, not isometric**.
+
+**Dependencies.** Phases 1–6 complete. Branch `feat/pixel-canvas` off `main`.
+
+**Why this exists.** Phase 5 built a working floor, but a 100 px strip inside a 760 px vertical
+panel stack reads as a dashboard with a decoration in it, whatever is drawn inside. The feel
+being aimed at comes from the *world being the interface*, which is a shell change, not a
+component restyle.
+
+### Non-negotiables
+
+- **Frontend only.** `components.jsx`, `App.jsx`, `styles.css`. No backend, no protocol, no
+  `CONTRACT.md` edits. Every event needed already exists and is verified.
+- **Coordinates stay percentages (0–100).** `CONTRACT.md` line 168. Desks and decor are
+  positioned in percentages too, or they drift out of alignment with the pawns at other widths.
+- **`ws_smoke.py` 58/58 before merge.** Close every browser tab on the deployed URL first, or
+  four connection-leak checks fail for unrelated reasons.
+- **Verify with a screenshot, not `scrollHeight === innerHeight`.** That measurement has already
+  reported success once for a layout `overflow: hidden` had amputated.
+
+### Slices — in this order, each leaving a working app
+
+Ordered so the risky restructure is **last and cuttable**. Stop after any slice and the app
+still works and still demos.
+
+1. **Floor foundation.** Grow the floor to the hero surface. Checkerboard tile pattern, desk
+   rectangles at the two slot positions, CSS monitor shapes, plant/decor in the corners. No
+   sprite or layout changes yet. *Pure addition — biggest visible win per hour.*
+2. **Pixel sprites.** Replace the emoji pawns with CSS `box-shadow` 16×16 sprites, three
+   designs, 2-frame idle/busy via `@keyframes`. Keep `translate(-50%, -50%)` centring and the
+   `busyUsers` flag driving the busy frame.
+3. **Desks wired to slot state.** A desk's monitor lights up while its slot is BUSY and shows
+   who holds it. This is the slice that makes the floor *mean* something rather than decorate —
+   the scheduler becomes visible in the world.
+4. **Chrome inversion.** Quota meter to a top bar, member status bar along the bottom, remaining
+   panels collapsed or moved around the canvas. *The risky one. Everything above ships without
+   it.*
+5. **Demo format.** Re-measure the board, pick the new window size, update `DEMO.md`'s window
+   dimensions and pre-flight, re-run `rehearse.py --takes 2`.
+
+### Validation
+
+- `python scripts/ws_smoke.py` → 58/58
+- `python scripts/rehearse.py --takes 2` → 12/12 twice
+- Screenshot at the demo window size with nothing clipped and no horizontal scroll
+- Sprites legible at **actual recording size**, not at desktop zoom
+- Two browsers still agree on every avatar position
+
+**Gate.** The floor reads as a room, the scheduler is visible in it, and the demo still passes.
+
+> **Feature freeze with 6 hours left on the clock, whatever state this is in.** The submission
+> is already complete and banked on `main` (`df8282a`); Phase 7 is upside. If it is not merged
+> and rehearsed by the freeze, record from `main` and ship that.
+
+---
+
 ## If you are behind schedule
 
 Cut in this order:

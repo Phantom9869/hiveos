@@ -5,6 +5,8 @@
  * on: three windows, one board, no divergence.
  */
 
+import { SHADOWS, SPRITE_HEIGHT, SPRITE_WIDTH } from './sprites'
+
 const NUM = new Intl.NumberFormat('en-US')
 
 /** BUILD_PLAN.md: green <50%, amber 50-80%, red >80%. */
@@ -130,6 +132,87 @@ export function QuotaPanel({ tokensUsed, tokenBudget, pctUsed, exhausted, estima
   )
 }
 
+/* The quota, as chrome rather than a panel.
+ *
+ * Same numbers, same semantic tones, same tick geometry as QuotaPanel — this
+ * is a re-layout, not a second implementation, and it deliberately keeps the
+ * strip because a segment snapping on is what survives video compression.
+ * Costs ~70px where the panel cost 148, which is most of what putting the room
+ * first had to pay for.
+ */
+export function QuotaBar({ tokensUsed, tokenBudget, pctUsed, exhausted, estimated }) {
+  const pct = Math.max(0, Math.min(100, pctUsed ?? 0))
+  const tone = toneFor(pct)
+  const remaining = Math.max(0, (tokenBudget ?? 0) - (tokensUsed ?? 0))
+
+  return (
+    <section className="quotabar" aria-label="Team token quota">
+      <div className="quotabar__row">
+        <span className="quotabar__label">Team quota</span>
+        <span className="quotabar__used">{NUM.format(tokensUsed ?? 0)}</span>
+        <span className="quotabar__budget">/ {NUM.format(tokenBudget ?? 0)}</span>
+        <span className={`quotabar__pct tone--${tone}`}>{pct.toFixed(1)}%</span>
+      </div>
+
+      <div
+        className="strip"
+        role="meter"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="Team token quota used"
+      >
+        <div
+          className={`strip__fill tone--${tone}`}
+          style={{ clipPath: `inset(0 ${100 - pct}% 0 0)` }}
+        />
+      </div>
+
+      <p className={`quotabar__note ${exhausted ? 'quotabar__note--alarm' : ''}`}>
+        {exhausted
+          ? 'Quota reached — HiveOS stops invoking the agent.'
+          : `${NUM.format(remaining)} tokens left, shared by the whole team`}
+        {!exhausted && estimated ? ' · partly estimated' : ''}
+      </p>
+    </section>
+  )
+}
+
+/* Who is in the room and what they are doing, along the bottom.
+ *
+ * The same three states the floor shows, in a form that survives someone
+ * standing behind a desk or two people overlapping — the room is the nicer
+ * read, this is the reliable one.
+ */
+export function MemberBar({ members, me, busyUsers, queue }) {
+  const queuedBy = new Map(queue.map((entry) => [entry.user_id, entry.queue_position]))
+
+  return (
+    <section className="memberbar" aria-label="Who is here">
+      {members.map((member, index) => {
+        const busy = busyUsers.has(member.user_id)
+        const position = queuedBy.get(member.user_id)
+        const state = busy ? 'busy' : position ? 'queued' : 'idle'
+        return (
+          <div key={member.user_id} className={`member member--${state}`}>
+            <span
+              className={`member__face sprite--${index % 3}`}
+              style={{ '--art': SHADOWS[index % 3] }}
+              aria-hidden="true"
+            />
+            <span className="member__name">
+              {member.user_id === me ? `${member.user_id} (you)` : member.user_id}
+            </span>
+            <span className="member__state">
+              {busy ? 'working' : position ? `queued #${position}` : 'idle'}
+            </span>
+          </div>
+        )
+      })}
+    </section>
+  )
+}
+
 export function SlotsPanel({ agents, me }) {
   const running = agents.filter((a) => a.status === 'BUSY').length
 
@@ -221,15 +304,45 @@ const ARROWS = {
   ArrowRight: [STEP, 0],
 }
 
+/* Desk positions, in the same 0-100 percentage space as the avatars.
+ *
+ * Percentages, not pixels, for exactly the reason CONTRACT.md gives for avatar
+ * coordinates: three browsers at different widths have to agree on where
+ * things are. A pixel desk would sit under a different person's feet on a
+ * narrower window, which is the one thing this board is supposed to be
+ * incapable of.
+ *
+ * `slot_id` ties a desk to a real scheduler slot, so the room is a view of
+ * machine state rather than scenery that happens to resemble it.
+ */
+const DESKS = [
+  { slot_id: 'coder', x: 27, y: 34, label: 'coder' },
+  { slot_id: 'researcher', x: 73, y: 34, label: 'researcher' },
+]
+
+/* Fixed decor. Percentages for the same reason; the corners are chosen to stay
+ * clear of both desks and of the spawn scatter. */
+const PLANTS = [
+  { x: 7, y: 78 },
+  { x: 93, y: 78 },
+]
+
 /* The shared workspace floor.
  *
- * Absolutely positioned markers inside a fixed-ratio box, moved with a CSS
- * transition — no canvas element, no game engine, no animation loop
- * (ARCHITECTURE.md rules a game engine out, and nothing here needs one).
- * Positions are percentages, so the same board renders identically at any
- * window width, which is the property the three-browser demo depends on.
+ * Absolutely positioned elements inside a box, moved with CSS transitions — no
+ * canvas element, no game engine, no animation loop (ARCHITECTURE.md rules a
+ * game engine out, and nothing here needs one). Everything is positioned in
+ * percentages, so the same room renders identically at any window width, which
+ * is the property the multi-browser demo depends on.
+ *
+ * The desks are not decoration: each one is bound to a scheduler slot and
+ * lights up while that slot is BUSY, so "both agents are working and a third
+ * person is waiting" is legible from the room itself.
  */
-export function CanvasPanel({ members, me, busyUsers, onMove }) {
+export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], onMove }) {
+  const bySlot = new Map(agents.map((agent) => [agent.slot_id, agent]))
+  const queuedBy = new Map(queue.map((entry) => [entry.user_id, entry.queue_position]))
+
   const move = (event) => {
     const box = event.currentTarget.getBoundingClientRect()
     if (!box.width || !box.height) return
@@ -268,9 +381,47 @@ export function CanvasPanel({ members, me, busyUsers, onMove }) {
           'Click or use the arrow keys to move your marker.'
         }
       >
-        {members.map((member) => {
+        {/* Desks first so pawns paint over them — someone standing at a desk
+            should be in front of it, not behind it. */}
+        {DESKS.map((desk) => {
+          const slot = bySlot.get(desk.slot_id)
+          const busy = slot?.status === 'BUSY'
+          return (
+            <div
+              key={desk.slot_id}
+              className={`desk ${busy ? 'desk--busy' : ''}`}
+              style={{ left: `${desk.x}%`, top: `${desk.y}%` }}
+              aria-hidden="true"
+            >
+              {/* Label above the desk, not below it. People approach a desk
+                  from the chair side, so a label under the chair is guaranteed
+                  to end up behind somebody's head. */}
+              <span className="desk__label">{desk.label}</span>
+              <span className="desk__monitor" />
+              <span className="desk__surface">
+                <span className="desk__keyboard" />
+              </span>
+              <span className="desk__chair" />
+            </div>
+          )
+        })}
+
+        {PLANTS.map((plant, i) => (
+          <div
+            key={i}
+            className="decor decor--plant"
+            style={{ left: `${plant.x}%`, top: `${plant.y}%` }}
+            aria-hidden="true"
+          >
+            <span className="decor__leaves" />
+            <span className="decor__pot" />
+          </div>
+        ))}
+
+        {members.map((member, index) => {
           const mine = member.user_id === me
           const busy = busyUsers.has(member.user_id)
+          const position = queuedBy.get(member.user_id)
           return (
             <div
               key={member.user_id}
@@ -280,10 +431,23 @@ export function CanvasPanel({ members, me, busyUsers, onMove }) {
                 top: `${Math.max(0, Math.min(100, Number(member.y) || 0))}%`,
               }}
             >
-              <span className="pawn__body">{member.avatar || '🐝'}</span>
+              {/* Three sprite designs, assigned by position in the deduped
+                  member list so everyone looks distinct without the server
+                  having to carry an appearance field. */}
+              <span
+                className={`sprite sprite--${index % 3}`}
+                style={{
+                  '--art': SHADOWS[index % 3],
+                  width: SPRITE_WIDTH,
+                  height: SPRITE_HEIGHT,
+                }}
+                aria-hidden="true"
+              />
               <span className="pawn__name">
                 {mine ? 'you' : member.user_id}
-                {busy && <span className="pawn__work" aria-label="running a task" />}
+              </span>
+              <span className="pawn__state">
+                {busy ? 'working' : position ? `queued #${position}` : 'idle'}
               </span>
             </div>
           )
