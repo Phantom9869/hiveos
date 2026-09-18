@@ -156,7 +156,7 @@ function RequestPanel({ hive }) {
   }
 
   return (
-    <section className="panel" aria-labelledby="request-label">
+    <section className="panel panel--request" aria-labelledby="request-label">
       <div className="panel__head">
         <span className="panel__label" id="request-label">
           Request an agent

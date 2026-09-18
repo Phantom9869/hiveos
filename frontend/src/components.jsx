@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-import { SPRITE_HEIGHT, SPRITE_WIDTH, lookFor } from './sprites'
+import { lookFor } from './sprites'
 
 const NUM = new Intl.NumberFormat('en-US')
 
@@ -482,7 +482,7 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
   }
 
   return (
-    <section className="panel" aria-labelledby="floor-label">
+    <section className="panel panel--floor" aria-labelledby="floor-label">
       <div className="panel__head">
         <span className="panel__label" id="floor-label">
           Workspace floor
@@ -588,8 +588,6 @@ export function CanvasPanel({ members, me, busyUsers, agents = [], queue = [], o
                   '--art': seated ? look.seat : look.art,
                   '--art-step': look.step,
                   '--sp-hair': look.hair,
-                  width: SPRITE_WIDTH,
-                  height: SPRITE_HEIGHT,
                 }}
                 aria-hidden="true"
               />
@@ -626,7 +624,7 @@ export function ToastStack({ toasts }) {
 
 export function MemoryPanel({ memory }) {
   return (
-    <section className="panel" aria-labelledby="memory-label">
+    <section className="panel panel--memory" aria-labelledby="memory-label">
       <div className="panel__head">
         <span className="panel__label" id="memory-label">
           Team memory
@@ -649,7 +647,7 @@ export function MemoryPanel({ memory }) {
 
 export function ActivityPanel({ activity, children }) {
   return (
-    <section className="panel panel--grow" aria-labelledby="activity-label">
+    <section className="panel panel--grow panel--activity" aria-labelledby="activity-label">
       <div className="panel__head">
         <span className="panel__label" id="activity-label">
           Activity

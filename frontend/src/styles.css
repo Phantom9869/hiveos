@@ -53,6 +53,14 @@
    * jade of a healthy budget. */
   --foliage: #3d5c48;
 
+  /* Room scale. Everything in the floor is sized off these two, so the wide
+   * layout only has to change the numbers rather than restate the furniture.
+   * `--px-n` is unitless: it is both the sprite pixel size and the factor the
+   * generated box-shadow art (baked at 4) is scaled by. */
+  --px-n: 4;
+  --tile-size: 44px;
+  --furn: 1;
+
   /* Sprite palette. Lives here rather than on `.sprite` because the member bar
    * draws the same art from a different class — scoping these to `.sprite`
    * left the chip portraits with undefined colours, so their shadows silently
@@ -833,21 +841,26 @@ body {
    * the desks read as being against something. The baseboard is a single 3px
    * line and does more for that impression than anything else here. */
   background-image:
-    linear-gradient(var(--wall-trim), var(--wall-trim)),
-    linear-gradient(var(--wall), var(--wall)),
+    linear-gradient(
+      var(--wall) 0 calc(100% - 3px),
+      var(--wall-trim) calc(100% - 3px) 100%
+    ),
     linear-gradient(45deg, var(--tile) 25%, transparent 25%, transparent 75%, var(--tile) 75%),
     linear-gradient(45deg, var(--tile) 25%, transparent 25%, transparent 75%, var(--tile) 75%);
+  /* The wall is a *percentage* of the floor, not a fixed 52px, so it stays a
+   * wall when the room grows on a wide screen instead of thinning into a
+   * stripe. 20% matches WALK_TOP (22) in components.jsx closely enough that
+   * nobody stands in it. Wall and baseboard are one layer — a separately
+   * positioned 3px line cannot track a percentage-sized band. */
   background-size:
-    100% 3px,
-    100% 52px,
-    44px 44px,
-    44px 44px;
+    100% 20%,
+    var(--tile-size) var(--tile-size),
+    var(--tile-size) var(--tile-size);
   background-position:
-    0 50px,
     0 0,
     0 0,
-    22px 22px;
-  background-repeat: no-repeat, no-repeat, repeat, repeat;
+    calc(var(--tile-size) / 2) calc(var(--tile-size) / 2);
+  background-repeat: no-repeat, repeat, repeat;
   background-color: var(--floor);
   /* Vignette. Pulls the eye to the middle of the room and stops the tile field
    * running flat into the panel border. */
@@ -879,8 +892,8 @@ body {
 
 .desk__surface {
   position: relative;
-  width: 76px;
-  height: 26px;
+  width: calc(76px * var(--furn));
+  height: calc(26px * var(--furn));
   border-radius: 2px;
   /* Warm laminate rather than flat grey. A top-down desk needs a lit top edge
    * and a dark front edge or it is just a rectangle. */
@@ -924,16 +937,16 @@ body {
   left: 50%;
   bottom: 5px;
   transform: translateX(-50%);
-  width: 30px;
-  height: 6px;
+  width: calc(30px * var(--furn));
+  height: calc(6px * var(--furn));
   border-radius: 1px;
   background: var(--desk-edge);
   box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
 }
 
 .desk__monitor {
-  width: 30px;
-  height: 20px;
+  width: calc(30px * var(--furn));
+  height: calc(20px * var(--furn));
   border-radius: 1px;
   background: var(--screen-off);
   box-shadow: inset 0 0 0 2px var(--desk-edge);
@@ -965,9 +978,9 @@ body {
  * than as furniture. */
 .desk__chair {
   position: relative;
-  width: 22px;
-  height: 18px;
-  margin-top: 4px;
+  width: calc(22px * var(--furn));
+  height: calc(18px * var(--furn));
+  margin-top: calc(4px * var(--furn));
   border-radius: 4px 4px 7px 7px;
   background: var(--chair);
   box-shadow:
@@ -1020,9 +1033,9 @@ body {
   flex-direction: column;
   justify-content: center;
   gap: 4px;
-  width: 74px;
-  height: 30px;
-  padding: 0 7px;
+  width: calc(74px * var(--furn));
+  height: calc(30px * var(--furn));
+  padding: 0 calc(7px * var(--furn));
   border-radius: 2px;
   background: #33414f;
   box-shadow:
@@ -1051,16 +1064,16 @@ body {
 }
 
 .cooler__bottle {
-  width: 14px;
-  height: 14px;
+  width: calc(14px * var(--furn));
+  height: calc(14px * var(--furn));
   border-radius: 3px 3px 1px 1px;
   background: rgba(79, 168, 199, 0.32);
   box-shadow: inset 0 -3px 0 0 rgba(79, 168, 199, 0.22);
 }
 
 .cooler__body {
-  width: 16px;
-  height: 16px;
+  width: calc(16px * var(--furn));
+  height: calc(16px * var(--furn));
   border-radius: 1px 1px 2px 2px;
   background: #38454f;
   box-shadow: 0 3px 5px var(--shadow);
@@ -1087,8 +1100,8 @@ body {
 .fixture--window {
   left: 16%;
   top: 9%;
-  width: 70px;
-  height: 28px;
+  width: calc(70px * var(--furn));
+  height: calc(28px * var(--furn));
   border-radius: 2px;
   background: linear-gradient(160deg, var(--glass), #1d3440);
   box-shadow:
@@ -1157,8 +1170,8 @@ body {
  * three offset shadows — cheaper than an SVG and it matches the chunky
  * geometry of everything else in the room. */
 .decor__leaves {
-  width: 10px;
-  height: 10px;
+  width: calc(10px * var(--furn));
+  height: calc(10px * var(--furn));
   border-radius: 50%;
   background: var(--foliage);
   box-shadow:
@@ -1168,9 +1181,9 @@ body {
 }
 
 .decor__pot {
-  width: 12px;
-  height: 9px;
-  margin-top: 7px;
+  width: calc(12px * var(--furn));
+  height: calc(9px * var(--furn));
+  margin-top: calc(7px * var(--furn));
   border-radius: 1px 1px 3px 3px;
   background: var(--desk);
   box-shadow:
@@ -1229,6 +1242,11 @@ body {
   filter: blur(2px);
 }
 
+.sprite {
+  width: calc(9 * var(--px-n) * 1px);
+  height: calc(10 * var(--px-n) * 1px);
+}
+
 .sprite::before {
   content: '';
   position: absolute;
@@ -1237,6 +1255,12 @@ body {
   width: 4px;
   height: 4px;
   box-shadow: var(--art);
+  /* The art is generated at 4px per pixel (sprites.js SCALE). Scaling the one
+   * real pixel scales every shadow offset with it, so the whole character
+   * grows without regenerating anything — and stays crisp, because there is no
+   * bitmap here to resample. */
+  transform: scale(calc(var(--px-n) / 4));
+  transform-origin: 0 0;
   /* A one-pixel dark rim around the whole composed sprite. Cheap — one filter
    * rather than another ~60 shadow entries per design — and it is what stops
    * the characters dissolving into a patterned floor of almost the same value.
@@ -1641,6 +1665,91 @@ body {
   /* The marker still moves — it just arrives instead of travelling. */
   .pawn {
     transition: none;
+  }
+}
+
+
+/* --- Wide screens: the room becomes the room ------------------------------ *
+ *
+ * Below this width the board stays exactly as it was — a single 760px column,
+ * which is what three side-by-side demo windows need. Above it the column cap
+ * comes off and the app lays out properly: the floor takes the space it
+ * deserves and everything that is text moves into a rail beside it.
+ *
+ * Deliberately a *widening*, not a second design. Same panels, same order in
+ * the DOM, same components — only the placement changes, so there is no second
+ * layout to keep in sync and no chance of the two disagreeing about state.
+ */
+@media (min-width: 1100px) {
+  .board {
+    max-width: none;
+    width: 100%;
+    height: 100dvh;
+    border-left: none;
+    border-right: none;
+    display: grid;
+    /* The rail is sized in ch rather than px so it holds a readable measure of
+     * agent output regardless of the viewport — the activity log is prose, and
+     * prose that runs the width of a 27" screen is unreadable. */
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 46ch);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      'rail    rail'
+      'quota   quota'
+      'floor   request'
+      'floor   memory'
+      'floor   activity'
+      'members members';
+  }
+
+  .rail { grid-area: rail; }
+  .quotabar { grid-area: quota; }
+  .panel--floor { grid-area: floor; }
+  .panel--request { grid-area: request; }
+  .panel--memory { grid-area: memory; }
+  .panel--activity { grid-area: activity; }
+  .memberbar { grid-area: members; }
+
+  /* The rail needs a left edge; the floor spans the rows beside it. */
+  .panel--request,
+  .panel--memory,
+  .panel--activity {
+    border-left: 1px solid var(--rule);
+  }
+
+  .panel--floor {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-bottom: none;
+  }
+
+  /* Fills the column instead of a fixed 250px. The room's contents are all
+   * positioned in percentages, so it simply gets bigger — which is the whole
+   * point of the wide layout. */
+  .floor {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .panel--activity {
+    min-height: 0;
+  }
+
+  /* Sticky is for the narrow layout, where the bar sits at the end of a long
+   * scrolling column. Here it is a grid row and already at the bottom. */
+  .memberbar {
+    position: static;
+  }
+
+  /* The room got bigger; its contents have to as well, or 36px people stand
+   * in a 1000px hall looking lost. One knob each for the characters and the
+   * furniture — see the tokens at the top of this file. */
+  .floor {
+    --px-n: 6;
+    --tile-size: 60px;
+    --furn: 1.45;
   }
 }
 
