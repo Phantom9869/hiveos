@@ -15,7 +15,7 @@
 | **Track** | Ship It (deployed, public URL) |
 | **Deadline** | 2026-09-20 |
 | **Current phase** | **Phase 6 — demo readiness** |
-| **Phase status** | `NOT STARTED`. Phases 4 and 3-without-Bedrock complete; Phase 5 recommended cut |
+| **Phase status** | `BLOCKED — WAITING FOR MANUAL ACTION`. Everything buildable is done and rehearsed; **recording, upload and submission are the user's** |
 | **Deployment state** | Stack `hiveos` live in `us-east-1`. DynamoDB + WebSocket API + Router + SQS/DLQ + Agent Runner. Frontend live on Amplify. |
 | **🌐 Public URL** | **https://main.dbavt8jr66qxx.amplifyapp.com** — verified cold, zero setup |
 | **WebSocket endpoint** | `wss://mel2gpat9c.execute-api.us-east-1.amazonaws.com/prod` |
@@ -37,8 +37,8 @@
 | 2 | Scheduler + queue (no LLM) | `COMPLETE` |
 | 3 | Bedrock + agent + memory | `COMPLETE EXCEPT THE MODEL CALL` — memory, token accounting and the ceiling are live |
 | 4 | Frontend HUD + public URL | `COMPLETE` |
-| 5 | Agent chat + 2D canvas (cuttable) | `NOT STARTED` — recommended **cut** |
-| 6 | Demo readiness | `NOT STARTED` ← **next** |
+| 5 | Agent chat + 2D canvas (cuttable) | `CUT` — decided 2026-09-18, nothing depends on it |
+| 6 | Demo readiness | `BLOCKED — WAITING FOR MANUAL ACTION` — tasks 1–5 and 8 done; 6, 7, 9 are the user's ← **here** |
 
 **Phase 3 was split** (user decisions, 2026-09-18). Phase 4 shipped first because it produces
 the submission; then everything in Phase 3 that does not need a model call was built:
@@ -60,6 +60,70 @@ the response's usage block with `estimated=False`, and nothing else in the syste
 ---
 
 ## Completed
+
+**Phase 6 — 2026-09-18 — demo readiness (everything except the recording itself)**
+
+No new features, per `BUILD_PLAN.md`. Two scripts and two documents:
+
+- `scripts/reset-demo.sh` — the one command to run between takes. Wraps `seed.sh` (which still
+  owns the DynamoDB demo state — duplicating it would let the two definitions drift) and adds
+  the four things that are invisible until they are on camera: **stale `CONN#` rows** from a
+  crashed tab, **in-flight SQS messages** from the previous take, **cold Lambdas**, and
+  **verification**. It defaults to `TOKEN_BUDGET=5000`.
+- `scripts/rehearse.py` — drives the recorded sequence as three WebSocket clients and
+  wall-clock times every beat. Distinct from `ws_smoke.py` on purpose: `ws_smoke` asks *is the
+  system correct*, this asks *does the sequence I am about to record work, in that order, in
+  the time I have*. Every assertion is something a viewer can see on screen.
+- `DEMO.md` — the run sheet: pre-flight checklist, beat-by-beat narration, the exact wording
+  for the SQS claim, the stub sentence, and the mid-take fallback table.
+- `SUBMISSION.md` — the writeup (`BUILD_PLAN.md` task 8), with the video link left blank.
+
+**Rehearsed against deployed AWS — `python scripts/rehearse.py --takes 2`, 12/12 twice:**
+
+| Check | Result |
+|---|---|
+| The token meter reads identically on all three screens | ✅ |
+| Every screen lists all three members | ✅ |
+| Alice's claim lands on a bystander's screen | ✅ 282–310 ms |
+| The third request gets a real queue position, not a failure | ✅ position 1 |
+| The whole team sees Charlie waiting — the queue is shared state | ✅ |
+| Alice's fact reaches a teammate's screen, attributed to her | ✅ |
+| **Charlie is auto-dispatched into the freed slot** | ✅ 187–234 ms |
+| **Charlie's agent already knows Alice's fact — nobody told it** | ✅ |
+| A browser opening the URL cold is told the counts are estimates | ✅ |
+| That cold browser renders the whole board from one frame | ✅ |
+
+Ceiling beat, separately (`--ceiling`, 5/5): real tasks drive the meter to the ceiling, the
+next request is refused before the agent is invoked, and **not one token is spent on it**.
+
+**Total product time is ~14 seconds** across all four beats — 96 s of headroom inside the
+110 s allowance. The demo is not time-constrained; the narration is.
+
+**The beat order changed, and the change matters.** `PROGRESS.md`'s earlier run sheet had Alice
+claim a slot and *then* save a fact. She cannot — the scheduler refuses a second concurrent
+claim from the same user, so that is two rounds and ~15 extra seconds. Folding the save into
+her claim prompt makes the fact land at the exact moment her slot frees and Charlie is
+dispatched into it, which is `BUILD_PLAN.md`'s beat and one continuous shot. `DEMO.md` has the
+corrected order.
+
+**Two traps found by rehearsing rather than by reading:**
+
+1. **`--ceiling` left a 60-token budget behind and broke the next `ws_smoke.py` run.**
+   `ws_smoke` resets `tokens_used` but never `token_budget`, so it inherited the tiny ceiling
+   and failed two checks for reasons unrelated to the code — one of them a confusing
+   *"a second concurrent claim is refused"* failure that was really a quota refusal. Fixed:
+   `rehearse.py` restores the standard budget in a `finally`, including on the failure path.
+2. **Bare `reset-demo.sh` seeded 1,000,000.** It inherited `seed.sh`'s production-shaped
+   default, at which a ~58-token task moves the meter 0.006% — invisible, which is the one
+   thing the recording cannot afford, and `DEMO.md` tells the operator to run it bare. The
+   demo-facing script now defaults to 5,000; `seed.sh` keeps its generic default.
+
+Neither was a product bug, and `python scripts/ws_smoke.py` is **49/49** with the board
+correctly seeded. But both would have cost real time at 2 a.m. the night before a deadline.
+
+**Not done — these are the user's, and Phase 6 is not complete until they are:**
+recording the take, uploading to YouTube and verifying it signed-out, and submitting.
+See *Manual actions pending*.
 
 **Phase 3 without Bedrock — 2026-09-18 — memory, token accounting, enforced ceiling**
 
@@ -447,19 +511,50 @@ slot scheduler, token accounting, WebSocket sync and the deployed URL are all bu
 > The "add a card" action that used to sit here is **done** — Visa •••• 3306 is on the account
 > and set as default. It did not unblock Bedrock. Do not repeat it.
 
-1. **Confirm AWS Budget notification email** — check `arunishrajput7@gmail.com` for the
+**These three are the only things standing between the repo and a submission.** Everything
+buildable is done, deployed and rehearsed.
+
+1. **Record the demo.** Follow `DEMO.md` exactly. Run `./scripts/reset-demo.sh` first (it
+   pre-warms the Lambdas and verifies the board), and `python scripts/rehearse.py --takes 2`
+   before that to confirm the sequence still passes. Three browsers, ~640 px wide, separate
+   profiles. Under 3:00.
+2. **Upload to YouTube** (public or unlisted) and **open the link in a signed-out browser.**
+   An accidentally-private video scores zero regardless of what was built. Paste the link into
+   `SUBMISSION.md`.
+3. **Submit** before 2026-09-20, with the public URL, the repo link and `SUBMISSION.md`.
+
+Housekeeping, not blocking:
+
+4. **Confirm AWS Budget notification email** — check `arunishrajput7@gmail.com` for the
    `hiveos-guardrail` subscription confirmation.
-2. **Optional, Phase 3 only: open an AWS Support case** about the account-level Bedrock
+5. **Optional, Phase 3 only: open an AWS Support case** about the account-level Bedrock
    restriction (42 of 43 per-day token quotas at zero, `adjustable=False`, first-party Amazon
    Nova included). Will not turn around before 2026-09-20, so this is for after the hackathon.
    Nothing in the remaining plan waits on it.
 
-Nothing on this list blocks the submission.
+Items 4 and 5 do not block the submission. Items 1–3 **are** the submission.
 
 ---
 
 ## Known issues and discoveries
 
+- **A demo-facing script must not inherit a production-shaped default.** `reset-demo.sh` called
+  `seed.sh` without a budget and got 1,000,000, at which the meter does not visibly move —
+  defeating the entire point of the 5,000 calibration two phases earlier. The general shape:
+  when a wrapper exists *for one specific purpose*, it owns the defaults for that purpose.
+- **A test that resets some state but not all of it poisons the next run.** `ws_smoke.py`
+  resets `tokens_used` and clears `MEMORY#`, but never reseeds `token_budget` — so a
+  `rehearse.py --ceiling` run left a 60-token ceiling behind and `ws_smoke` failed two checks
+  with messages that pointed nowhere near the cause. Anything that changes `token_budget` must
+  put it back; `rehearse.py` does so in a `finally`.
+- **The last task before the ceiling always overshoots it** (62 of 60). A task's cost is only
+  known once it has produced a response, so it cannot be charged in advance. The UI clamps
+  (`Math.min(100, pctUsed)`, `Math.max(0, remaining)`), so the meter reads 100.0% and 0
+  remaining rather than 103% — correct, and worth knowing before it appears on camera.
+  `ws_smoke.py` never saw this because it forces the counter to exactly the ceiling.
+- **A user holding a slot cannot claim another one**, so "claim, then save a fact" is two
+  rounds, not one. Folding `remember: …` into the claim prompt is what makes the memory beat a
+  single continuous shot. Cost ~15 s of demo time to discover by rehearsing.
 - **Amplify's `404-200` rule serves the right body with the wrong status.** A deep link like
   `/some/deep/link` returns HTTP **404** but the body is `index.html`, so the app boots
   normally. The custom rule is applied exactly as written (`aws amplify get-app --app-id
@@ -566,44 +661,36 @@ and no build service role, which makes it fully scriptable. The consequence is t
 
 ## Next recommended action
 
-**Go to Phase 6 — demo readiness. Cut Phase 5.**
+**Record the video.** Nothing else moves the submission forward.
 
-Every feature in `PRD.md`'s Must list is now built, deployed and verified. `BUILD_PLAN.md` is
-explicit that Phase 5 is the first thing to cut and that nothing downstream depends on it. With
-the deadline on 2026-09-20 and the video the only judge touchpoint, **rehearsing and recording
-is now the highest-value work by a wide margin.** There is nothing left to build that improves
-the submission more than a clean take does.
+Every feature in `PRD.md`'s Must list is built, deployed and verified; Phase 5 is cut; the
+recorded sequence passes 12/12 twice unattended and takes ~14 s of product time. There is
+nothing left to build that improves the submission more than a clean take does. **Do not start
+new work in a fresh session — open `DEMO.md` and record.**
+
+```bash
+python scripts/rehearse.py --takes 2   # confirm the sequence still passes
+./scripts/reset-demo.sh                # clean board, warm Lambdas, verified
+```
+
+Then follow `DEMO.md` beat by beat, and finish the three items in *Manual actions pending*.
+
+> **`DEMO.md` is the only run sheet.** The earlier list that lived in this section had Alice
+> claim a slot and then save a fact, which the scheduler does not allow — rehearsal caught it.
+> Two run sheets is how a wrong one gets followed at 2 a.m.
 
 If Bedrock is ever unblocked: open with one `bedrock-runtime converse` call and nothing more —
 the evidence says it needs AWS Support. Then fill in `_run_agent` and add
 `bedrock:InvokeModel` to the Agent Runner role in `template.yaml` (the Phase 3 section is
 already stubbed out with a comment). Nothing else changes.
 
-### Suggested demo run sheet
+### Standing gotchas for the recording
 
-The script in `BUILD_PLAN.md` works as written. Concretely, with three browsers:
-
-1. `TOKEN_BUDGET=5000 ./scripts/seed.sh` — clean board.
-2. Alice and Bob each request an agent → both slots BUSY on all three screens, meter ticks.
-3. Charlie requests → real queue position #1, visible everywhere.
-4. A slot frees → Charlie auto-dispatches. **This is the money shot.**
-5. Alice: `remember: deploy window = Friday 16:00 UTC` → fact appears on every screen.
-6. Charlie asks anything → his agent's response already carries Alice's fact.
-7. Say the stub sentence (above) once, plainly.
-
-For the ceiling beat, seed a nearly-spent budget instead: `TOKEN_BUDGET=100 ./scripts/seed.sh`,
-then one task pushes it over and the refusal is real on camera.
-
-### Before recording
-
-- `TOKEN_BUDGET=5000 ./scripts/seed.sh` resets the board to a clean demo state — slots IDLE,
-  queue and memory cleared, counter zeroed.
 - **Close stray browser tabs before running `ws_smoke.py`.** Its CONN#-leak checks assert the
   table holds no connection rows, so one live browser fails four checks that have nothing to do
-  with the code. This cost time once already.
-- Pre-warm both Lambdas — a cold Router adds visible latency to the first claim.
+  with the code. `reset-demo.sh` warns when it finds live rows.
 - Three browsers at ~640 px wide each is the layout the HUD was designed for; it fits without
   scrolling at 640×880.
-- Each browser needs a **different origin or a cleared localStorage** to hold a separate
+- Each browser needs a **different profile or a cleared localStorage** to hold a separate
   identity: the entry gate persists to `localStorage['hiveos.identity']`, so two tabs of the
-  same origin share one name. Separate browsers or profiles are the simplest fix.
+  same origin share one name.

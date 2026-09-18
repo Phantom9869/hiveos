@@ -69,6 +69,8 @@ Read in this order:
 | `ARCHITECTURE.md` | System design and every rejected alternative |
 | `CONTRACT.md` | Schemas, protocols, and interfaces that must not drift |
 | `DEPLOYMENT.md` | AWS setup, deploy commands, manual actions, troubleshooting |
+| `DEMO.md` | The recording run sheet — checklist, beats, narration, fallbacks |
+| `SUBMISSION.md` | The hackathon writeup |
 
 **Fastest path to understanding:** `README.md` → `PROGRESS.md` → `ARCHITECTURE.md`.
 
@@ -121,13 +123,18 @@ aws cloudformation describe-stacks --stack-name hiveos \
 Verify the deployed backend actually behaves — two live clients, fan-out, and stale-connection cleanup, all against real AWS:
 
 ```bash
-TOKEN_BUDGET=5000 ./scripts/seed.sh   # clean board; small budget so the meter visibly moves
 pip install websockets
+./scripts/reset-demo.sh               # clean board, SQS drained, Lambdas warm — and verified
 python scripts/ws_smoke.py            # 49 checks: backbone, scheduler, memory, ceiling
+python scripts/rehearse.py --takes 2  # the recorded demo sequence, 12 checks, unattended
 ```
 
 Close any browser tab pointed at the deployed URL first — the connection-leak checks assert the
-table holds no `CONN#` rows, so a live browser fails four of them.
+table holds no `CONN#` rows, so a live browser fails four of them. `reset-demo.sh` warns you
+when it finds live rows.
+
+`ws_smoke.py` asks whether the system is **correct**; `rehearse.py` asks whether the sequence
+about to be **recorded** works, in order, inside the time available, and times every beat.
 
 Full procedure, verification steps, and troubleshooting: `DEPLOYMENT.md`.
 
@@ -145,7 +152,7 @@ frontend/
   src/useHive.js   WebSocket client — owns all board state, reconnect, re-sync
   src/components.jsx  Quota strip, slot cards, run queue, activity log
   src/App.jsx      Entry gate, request form, board layout
-scripts/           Seeding, WebSocket smoke test, frontend deploy
+scripts/           Seeding, demo reset, smoke test, demo rehearsal, frontend deploy
 template.yaml      SAM — all AWS infrastructure
 ```
 
